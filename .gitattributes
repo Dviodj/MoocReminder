@@ -1,0 +1,9 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.dll binary
+*.png binary
+*.zip binary
+.native-webview/LICENSE.txt -whitespace
+.native-webview/NOTICE.txt -whitespace

@@ -1,0 +1,5 @@
+playwright==1.63.0
+pyinstaller==6.22.3
+websocket-client==1.9.2
+PySide6==6.12.0
+pythonnet==3.2.1

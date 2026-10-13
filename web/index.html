@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MoocReminder · 作业提醒</title><link rel="stylesheet" href="/app.css"><script src="/app.js" defer></script></head>
+<body>
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="m3 6 2 2 3-4M11 6h10M3 13h4m4 0h10M3 20h4m4 0h10"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2m-8 3h2"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6C8 3 4 3 2 4v15c4-1 7-1 10 2 3-3 6-3 10-2V4c-3-1-6-1-10 2Zm0 0v15"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-9 12a3 3 0 0 0 6 0"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 4 2 2v3l4 2 1 3h4l1-3 4-2v-3l2-2-2-4-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 2M5 16a8 8 0 0 0 13 2"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 3 2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14m8-14v14"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+</defs></svg>
+<div class="workspace" id="workspace">
+<aside class="sidebar">
+ <div class="traffic"><button class="dot red" id="quit" title="退出程序" aria-label="退出程序"></button><button class="dot yellow" id="collapse" title="收起侧栏" aria-label="收起侧栏"></button><button class="dot green" id="fullscreen" title="全屏" aria-label="全屏"></button></div>
+ <div class="brand"><div class="brand-icon"><svg><use href="#i-calendar"/></svg></div><div class="brand-copy"><strong>MoocReminder</strong><span>COURSE REMINDERS</span></div></div>
+ <div class="nav-caption">学习空间</div>
+ <nav class="navigation" aria-label="主导航">
+  <button class="nav-item selected" data-view="overview"><svg><use href="#i-grid"/></svg><span>总览</span><span class="nav-count" id="nav-count">0</span></button>
+  <button class="nav-item" data-view="tasks"><svg><use href="#i-list"/></svg><span>作业清单</span></button>
+  <button class="nav-item" data-view="courses"><svg><use href="#i-book"/></svg><span>我的课程</span></button>
+ </nav>
+ <div class="nav-caption second-caption">偏好设置</div>
+ <button class="nav-item" data-view="settings"><svg><use href="#i-bell"/></svg><span>提醒设置</span></button>
+ <button class="nav-item" id="diagnostics"><svg><use href="#i-info"/></svg><span>连接详情</span></button>
+ <div class="sidebar-spacer"></div>
+ <div class="sidebar-note"><div class="tiny-calendar"><svg><use href="#i-clock"/></svg></div><strong>把重要的日期，<br>留在视线里。</strong><p>按北京时间整理截止时间</p></div>
+ <div class="profile"><div class="avatar">学</div><div class="profile-copy"><strong>我的学习空间</strong><span><i id="connection-dot"></i><span id="connection-label">尚未连接慕课</span></span></div></div>
+</aside>
+<main class="main">
+ <header class="topbar"><div class="breadcrumb">学习空间 <span>/</span> <b id="breadcrumb-current">总览</b></div><div class="topbar-right"><span class="today" id="today"></span><button class="icon-button" id="pause" title="暂停自动检查" aria-label="暂停自动检查"><svg><use href="#i-pause"/></svg></button></div></header>
+ <section class="page-heading"><div><div class="eyebrow">A LITTLE MORE ORGANIZED</div><h1 id="page-title">作业概览</h1><p id="page-subtitle">截止时间看清楚，学习节奏更从容。</p></div><div class="heading-actions"><button class="button secondary" id="login"><svg><use href="#i-link"/></svg>连接慕课</button><button class="button primary" id="scan"><svg id="scan-icon"><use href="#i-refresh"/></svg><span id="scan-label">检查作业</span></button></div></section>
+ <div id="status-banner" class="status-banner hidden" role="status"><div class="banner-icon"><svg><use href="#i-info"/></svg></div><div class="banner-copy"><strong id="banner-title"></strong><p id="banner-description"></p></div><button class="button small secondary hidden" id="cancel">取消</button><button class="button small primary hidden" id="login-done">我已登录</button></div>
+ <section id="overview-content">
+  <div class="stats">
+   <article class="stat-card"><div class="stat-top"><span>待完成 / 待核对</span><div class="stat-icon violet"><svg><use href="#i-list"/></svg></div></div><div class="stat-value" id="stat-pending">0<span>项</span></div><div class="stat-footer"><span class="mini-dot violet-dot"></span>所有尚未截止的任务</div></article>
+   <article class="stat-card"><div class="stat-top"><span>3 天内截止</span><div class="stat-icon orange"><svg><use href="#i-clock"/></svg></div></div><div class="stat-value" id="stat-soon">0<span>项</span></div><div class="stat-footer"><span class="mini-dot orange-dot"></span>优先安排时间完成</div></article>
+   <article class="stat-card"><div class="stat-top"><span>已读取课程</span><div class="stat-icon blue"><svg><use href="#i-book"/></svg></div></div><div class="stat-value" id="stat-courses">0<span>门</span></div><div class="stat-footer">MOOC <span class="footer-separator">·</span> 校内 SPOC</div></article>
+  </div>
+  <section class="list-panel">
+   <div class="list-heading"><div><h2>接下来的作业</h2><p>按提交截止时间排序</p></div><div class="next-check"><span class="live-dot"></span><span id="schedule-label">每 30 分钟检查</span></div></div>
+   <div class="list-toolbar"><div class="segmented" id="type-tabs"><button class="active" data-kind="all">全部</button><button data-kind="作业">作业</button><button data-kind="测验">测验</button></div><div class="filters"><label class="search"><svg><use href="#i-search"/></svg><input id="search" placeholder="搜索课程或作业" aria-label="搜索课程或作业"></label><button class="past-toggle" id="past">已截止</button><button class="icon-button" id="export" title="导出 CSV" aria-label="导出 CSV"><svg><use href="#i-download"/></svg></button></div></div>
+   <div class="table-wrap" id="table-wrap"><table><thead><tr><th class="check-col"></th><th>作业与课程</th><th>提交截止</th><th>剩余时间</th><th>状态</th><th></th></tr></thead><tbody id="tasks"></tbody></table></div>
+   <div class="empty-state" id="empty"><div class="empty-illustration"><div class="illustration-halo"></div><svg><use href="#i-calendar"/></svg><span class="illustration-check"><svg><use href="#i-check"/></svg></span></div><h3 id="empty-title">先连接慕课，作业就有了归处</h3><p id="empty-description">在官网完成登录，再回来检查一次作业。<br>截止时间与提醒会为你自动整理好。</p><button class="button primary" id="empty-login"><svg><use href="#i-link"/></svg>打开登录网页<svg class="arrow"><use href="#i-arrow"/></svg></button><div class="privacy-note">登录在慕课官网完成 <span>·</span> 记录保存在本机</div></div>
+   <footer class="list-footer"><div><span class="footer-status-dot" id="footer-dot"></span><span id="footer-status">等待首次连接</span></div><button class="text-button" id="test-notification"><svg><use href="#i-bell"/></svg>测试提醒</button></footer>
+  </section>
+  <div class="bottom-note"><svg><use href="#i-info"/></svg><span>“请核对”表示官网未明确显示提交状态。完成后可勾选条目，停止这项作业的本地提醒。</span></div>
+ </section>
+ <section id="courses-content" class="hidden"><div class="section-intro"><h2>你的课程</h2><span class="muted">检查后自动更新 MOOC 与 SPOC 课程</span></div><div class="course-grid" id="course-grid"></div></section>
+ <section id="settings-content" class="hidden">
+  <form id="settings-form"><div class="settings-card"><div class="settings-title"><div class="stat-icon violet"><svg><use href="#i-bell"/></svg></div><div><h2>适合你的提醒节奏</h2><p>保持程序运行，最小化后仍会提醒。</p></div></div>
+   <div class="setting-row"><div><strong>提前多久提醒</strong><p>以小时为单位，多个时间用逗号分隔。</p></div><input id="setting-hours" class="field short-field" placeholder="72,24,3" required></div>
+   <div class="setting-row"><div><strong>自动检查间隔</strong><p>定期从慕课更新作业，至少 5 分钟。</p></div><div class="unit-field"><input id="setting-interval" class="field" type="number" min="5" max="1440" required><span>分钟</span></div></div>
+   <label class="setting-row"><div><strong>同时提醒测验</strong><p>将课程测验也加入截止提醒。</p></div><input class="switch" id="setting-quizzes" type="checkbox"></label>
+   <label class="setting-row"><div><strong>检查已结束学期</strong><p>需要查阅历史作业时开启。</p></div><input class="switch" id="setting-finished" type="checkbox"></label>
+  </div><div class="settings-card connection-settings"><div class="settings-title"><div class="stat-icon blue"><svg><use href="#i-link"/></svg></div><div><h2>连接与课程来源</h2><p>切换主页账号后，需要重新登录慕课。</p></div></div><label class="stacked-label">课程主页链接<input id="setting-home" class="field" type="url" required></label><label class="stacked-label">补充作业页链接<span>每行一条，包含 tid 学期编号；可留空。</span><textarea id="setting-manual" class="field" rows="3"></textarea></label></div><div class="settings-actions"><span id="settings-result" class="muted"></span><button class="button primary" type="submit">保存设置<svg><use href="#i-check"/></svg></button></div></form>
+ </section>
+ <div class="app-footer"><span>MoocReminder <b>v0.1</b></span><span>本机运行 <span class="footer-separator">·</span> 北京时间</span></div>
+</main></div>
+<dialog id="detail-dialog"><div class="modal-heading"><div><div class="eyebrow">CONNECTION STATUS</div><h2>连接详情</h2></div><button class="close-dialog" aria-label="关闭">×</button></div><div class="detail-message" id="detail-message"></div><div class="detail-errors" id="detail-errors"></div><p class="data-location" id="data-location"></p><div class="modal-actions"><button class="button secondary close-detail">知道了</button></div></dialog>
+<dialog id="notice-dialog"><div class="notice-hero"><div class="notice-bell"><svg><use href="#i-bell"/></svg></div><span class="eyebrow">A GENTLE REMINDER</span><h2 id="notice-title">作业即将截止</h2><p id="notice-description"></p></div><div id="notice-items"></div><div class="modal-actions"><button class="button primary close-notice">知道了<svg><use href="#i-check"/></svg></button></div></dialog>
+<div class="toast" id="toast" role="status"></div>
+</body></html>
