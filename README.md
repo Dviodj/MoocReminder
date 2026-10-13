@@ -1,4 +1,4 @@
-# MoocReminder v0.1
+# MoocReminder v0.1.1
 
 把 MOOC 作业的截止时间集中起来，在忘记提交之前提醒你。
 
@@ -12,13 +12,15 @@
 
 ![MoocReminder 界面](docs/images/overview.png)
 
-## v0.1 目前能做什么
+## 目前能做什么
 
 - **集中查看截止时间**：读取中国大学 MOOC 和校内 SPOC 的作业、测验，按截止时间整理。
 - **定期检查与提前提醒**：默认每 30 分钟检查，提前 3 天、1 天、3 小时弹窗提醒。
 - **按自己的节奏设置**：支持修改检查间隔、提醒时间、课程主页及补充作业链接。
 - **记录完成情况**：支持搜索和本地完成标记，完成后可停止该项提醒。
 - **保留已有记录**：单门课程读取失败时保留上次结果，登录配置按账号保存在本机。
+- **直观的启动过程**：独立启动窗口显示当前阶段和进度，支持取消、失败重试，并自动创建桌面快捷方式。
+- **新设备快速开始**：预置依赖运行包随附界面和 Python 依赖，首次启动跳过 pip 下载、安装；后续启动复用已验证的环境。
 
 主窗口采用 macOS 风格，程序运行在 Windows 上；通过原生 WebView2 窗口登录官网，登录窗口与后台检查共用本地配置。
 
@@ -37,14 +39,14 @@
 ### 运行环境
 
 - Windows。
-- 64 位 Python 3.11 或以上。
+- 64 位 Python 3.11–3.15（需包含 tkinter，常规 Python 安装包含）。
 - .NET Desktop Runtime 8 或以上。
 - Microsoft Edge WebView2 Runtime。
 
 ### 使用步骤
 
-1. 下载 [v0.1 发布包](https://github.com/Dviodj/MoocReminder/releases/tag/v0.1)，解压完整文件夹。
-2. 双击 **启动MoocReminder.bat**（也可用 **启动程序.bat**）。首次启动会安装 Python 依赖并验证网页组件。
+1. 新设备推荐下载 [v0.1.1 预置依赖运行包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.1/MoocReminder-v0.1.1-offline-x64.zip)，解压完整文件夹。这个包较大，但第一次打开无需再安装 Python 依赖。Python、.NET Desktop 和 WebView2 仍需提前安装。
+2. 双击 **启动MoocReminder.bat**（也可用 **启动程序.bat**），启动窗口会显示进度，随后打开主界面并创建桌面快捷方式。
 3. 打开 **提醒设置**，粘贴自己的课程主页链接：`https://www.icourse163.org/home.htm?userId=你的数字账号#/home/course`。默认的 `userId=0` 是占位值，需要替换。
 4. 点击 **连接慕课**，在打开的官网窗口中登录。
 5. 返回主窗口点击 **检查作业**，之后保持程序运行。
@@ -53,6 +55,8 @@
 
 官网未明确显示提交状态的条目会标为“请核对”。程序读取的是作业提交截止时间，互评截止时间不会列入提交提醒。
 
+需要较小的下载或进行开发时，也可使用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.1/MoocReminder-v0.1.1-source.zip)。源码包首次运行会联网安装缺少的依赖，所需时间取决于网络；预置依赖包把这一步移到发布前完成。进度条表示准备阶段，下载、检查等无法计算完成比例的阶段会显示动画。
+
 ## 本地数据与问题排查
 
 设置、作业缓存和完成标记优先保存在 `%LOCALAPPDATA%/MoocDeadlineReminder`；该目录不可写时，使用项目内的 `data` 文件夹。登录配置保存在数据目录下的 `webview2-profiles/<账号>`。
@@ -60,6 +64,8 @@
 个人登录配置和作业缓存不上传仓库，也不包含在发布包中。换电脑后需要重新登录。启动失败时可查看 `.launcher-state/startup.log`；读取失败时可在主窗口的 **连接详情** 查看错误。
 
 当前版本以源码方式运行。随附的官方 WebView2 SDK DLL 许可证和声明见 [.native-webview/LICENSE.txt](.native-webview/LICENSE.txt) 与 [NOTICE.txt](.native-webview/NOTICE.txt)。
+
+预置依赖包使用官方 PyPI wheel，构建时校验 SHA-256；组件版本与来源记录在 `.runtime-bundle/bundle.json`，第三方许可证保留在各组件及 `.dist-info` 目录中。该目录无需提交到 GitHub 源码仓库。
 
 ## 开发与验证
 
@@ -70,7 +76,9 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-v0.1 已通过 61 项自动测试，并验证了真实 MOOC/SPOC 的登录与读取。`native_adapter_smoke.py` 验证原生网页组件，`qt_login_click_check.py` 验证实际连接按钮。测试依赖 Windows GUI 和 Edge，应在交互式 Windows 会话运行。
+v0.1.1 已通过 83 项自动测试。在当前 Windows 电脑的干净目录中，预置依赖包首次启动约 2.8 秒显示主窗口，没有缓存、虚拟环境或 pip 安装；这是本机实测，其他设备速度会不同。用户已验证资源管理器双击启动窗口及桌面快捷方式。此前已验证真实 MOOC/SPOC 的登录与读取。
+
+`native_adapter_smoke.py` 验证原生网页组件，`qt_login_click_check.py` 验证实际连接按钮。测试依赖 Windows GUI 和 Edge，应在交互式 Windows 会话运行。发布者可先运行 `python bundle_runtime.py`，再运行 `python package_source.py --with-runtime` 制作预置依赖包；普通用户无需执行构建步骤。
 
 课程读取依赖官网当前页面结构。登录失效或网站结构变化时，程序会显示错误并保留缓存。
 

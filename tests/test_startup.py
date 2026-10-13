@@ -25,8 +25,8 @@ class StartupTests(unittest.TestCase):
             ready.write_text(json.dumps(dict(native_window=True)), encoding='utf-8')
             return SimpleNamespace(poll=lambda: None, wait=lambda: 0)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
-            plan = dict(python=str(MODERN),base_python=str(MODERN),venv_ready=True)
-            with patch('source_launcher.runtime_plan',return_value=plan), patch('source_launcher.subprocess.run',return_value=subprocess.CompletedProcess([],0)), patch('source_launcher.subprocess.Popen',side_effect=launch):
+            plan = dict(python=str(MODERN),base_python=str(MODERN),version=[3,13,9],venv_ready=True)
+            with patch('source_launcher.runtime_plan',return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.create_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.Popen',side_effect=launch):
                 self.assertEqual(source_launcher.run_app(Path(folder),[]),0)
             self.assertEqual(Path(captured['args'][0]),Path(folder)/'.venv/Scripts/pythonw.exe')
             self.assertNotIn('__PYVENV_LAUNCHER__', captured['env'])
@@ -64,8 +64,8 @@ class StartupCleanupTests(unittest.TestCase):
             return child if str(args[0]).endswith('pythonw.exe') else original_popen(args, **kwargs)
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
-                plan = dict(python=sys.executable, base_python=sys.executable, venv_ready=True)
-                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time.monotonic', side_effect=[0,21]):
+                plan = dict(python=sys.executable, base_python=sys.executable,version=[3,13,9], venv_ready=True)
+                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.create_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time.monotonic', side_effect=[0,21]):
                     with self.assertRaisesRegex(RuntimeError, '启动确认'):
                         source_launcher.run_app(Path(folder), [])
                 self.assertIsNotNone(child.poll(), 'startup failure left its process running')

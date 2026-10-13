@@ -1,6 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+if "%~1"=="" (
+    start "" wscript.exe "%~dp0launch.vbs"
+    exit /b 0
+)
 where python >nul 2>nul
 if errorlevel 1 (
     py -3 "%~dp0source_launcher.py" %*

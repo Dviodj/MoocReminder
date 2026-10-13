@@ -4,6 +4,8 @@
 *.bat text eol=crlf
 *.dll binary
 *.png binary
+*.ico binary
+*.vbs text eol=crlf
 *.zip binary
 .native-webview/LICENSE.txt -whitespace
 .native-webview/NOTICE.txt -whitespace

@@ -49,6 +49,7 @@ class Window(QMainWindow):
         self.controller = Controller(store, context_provider=self.manager.context, profile_dir='webview2-profiles')
         self.manager.on_error = lambda message: self.controller.events.put(('error', message))
         self.setWindowTitle(f'{APP_NAME} · 作业提醒 {VERSION}')
+        self.setWindowIcon(QIcon(str(Path(__file__).parent/'assets/MoocReminder.ico')))
         self.resize(1260, 850)
         self.setMinimumSize(1020, 670)
         self.setStyleSheet(STYLE)

@@ -27,3 +27,6 @@ qt-smoke/
 /*.png
 tmp*/
 *.tmp
+.superpowers/
+.runtime-bundle/
+.bundle-downloads/
