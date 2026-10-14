@@ -1,4 +1,4 @@
-# MoocReminder v0.1.1
+# MoocReminder v0.1.2
 
 把 MOOC 作业的截止时间集中起来，在忘记提交之前提醒你。
 
@@ -80,7 +80,7 @@
 
 官网未明确显示提交状态的条目会标为“请核对”。程序读取的是作业提交截止时间，互评截止时间不会列入提交提醒。
 
-需要较小的下载或进行开发时，也可使用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.1/MoocReminder-v0.1.1-source.zip)。源码包首次运行会联网安装缺少的依赖，所需时间取决于网络；预置依赖包把这一步移到发布前完成。进度条表示准备阶段，下载、检查等无法计算完成比例的阶段会显示动画。
+需要较小的下载或进行开发时，也可使用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.2/MoocReminder-v0.1.2-source.zip)。源码包不含内置运行环境，需要机器上已有 64 位 Python 3.11–3.15，并由使用者自行安装依赖；便携包把这些都放在发布前完成。
 
 ## 本地数据与问题排查
 
@@ -114,7 +114,7 @@ python -m venv .venv
 
 开发环境约 760 MB（QtWebEngine 占大部分）。`test_site` 与 `test_qt_reader` 会真实渲染页面，请在有图形界面的 Windows 会话运行，不需要联网。
 
-v0.1.1 发布时通过 83 项自动测试；当前开发状态为 **165 项通过**。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内），缺少 Playwright 时 `test_site` 无法运行浏览器端的旧用例。
+当前开发状态为 **166 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。v0.1.1 发布时通过 83 项。
 
 发布者制作便携包：先运行 `python bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。`qt_login_click_check.py` 用于人工验证真实的“连接慕课”按钮。
 
