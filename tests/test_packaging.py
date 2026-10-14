@@ -66,9 +66,11 @@ class ReleasePackagingTests(unittest.TestCase):
         (self.root/'THIRD-PARTY-NOTICES.md').write_text('notices fixture\n', encoding='utf-8')
         self.bundle = self.root/'.build/runtime-bundle'
         for name, payload in [('bundle.json', json.dumps({'platform': 'win_amd64', 'python_tags': ['cp313']})),
-                              ('common/PySide6/QtWidgets.pyd', 'binary'),
-                              ('common/pyside6_essentials-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt', 'qt'),
-                              ('common/pythonnet-3.2.1.dist-info/licenses/LICENSE', 'mit')]:
+                              ('python/python.exe', 'binary'),
+                              ('python/LICENSE.txt', 'psf'),
+                              ('python/Lib/site-packages/PySide6/QtWidgets.pyd', 'binary'),
+                              ('python/Lib/site-packages/pyside6_essentials-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt', 'qt'),
+                              ('python/Lib/site-packages/shiboken6-6.12.0.dist-info/licenses/LicenseRef-Qt-Commercial.txt', 'qt')]:
             path = self.bundle/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(payload, encoding='utf-8')
@@ -90,7 +92,8 @@ class ReleasePackagingTests(unittest.TestCase):
         # The launcher looks for the runtime bundle at the package root, so the
         # local .build/ organising folder must never appear inside the archive.
         self.assertIn(prefix + 'runtime-bundle/bundle.json', names)
-        self.assertIn(prefix + 'runtime-bundle/common/PySide6/QtWidgets.pyd', names)
+        self.assertIn(prefix + 'runtime-bundle/python/python.exe', names)
+        self.assertIn(prefix + 'runtime-bundle/python/Lib/site-packages/PySide6/QtWidgets.pyd', names)
         self.assertFalse([name for name in names if '.build/' in name])
         self.assertFalse([name for name in names if name.startswith(prefix + 'runtime-bundle/wheel-cache/')])
 
@@ -101,7 +104,9 @@ class ReleasePackagingTests(unittest.TestCase):
         prefix = 'MoocReminder-v9.9.9/'
         self.assertIn(prefix + 'licenses/LGPL-3.0.txt', names)
         self.assertIn(prefix + 'THIRD-PARTY-NOTICES.md', names)
-        self.assertIn(prefix + 'runtime-bundle/common/pythonnet-3.2.1.dist-info/licenses/LICENSE', names)
+        self.assertIn(prefix + 'runtime-bundle/python/LICENSE.txt', names)
+        self.assertIn(prefix + 'runtime-bundle/python/Lib/site-packages/shiboken6-6.12.0.dist-info'
+                              '/licenses/LicenseRef-Qt-Commercial.txt', names)
 
     def test_source_archive_excludes_the_runtime_bundle(self):
         archive_path = self.build(with_runtime=False)
@@ -112,10 +117,17 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertNotIn('MoocReminder-v9.9.9/THIRD-PARTY-NOTICES.md', names)
 
     def test_missing_component_license_blocks_the_release(self):
-        (self.bundle/'common/pythonnet-3.2.1.dist-info/licenses/LICENSE').unlink()
+        (self.bundle/'python/Lib/site-packages/shiboken6-6.12.0.dist-info'
+                    '/licenses/LicenseRef-Qt-Commercial.txt').unlink()
         with self.assertRaises(RuntimeError) as error:
             self.build(with_runtime=True)
-        self.assertIn('pythonnet-3.2.1.dist-info', str(error.exception))
+        self.assertIn('shiboken6-6.12.0.dist-info', str(error.exception))
+
+    def test_missing_interpreter_license_blocks_the_release(self):
+        (self.bundle/'python/LICENSE.txt').unlink()
+        with self.assertRaises(RuntimeError) as error:
+            self.build(with_runtime=True)
+        self.assertIn('license', str(error.exception).lower())
 
 
 if __name__ == '__main__':
