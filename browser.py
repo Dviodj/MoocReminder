@@ -1,7 +1,11 @@
-"""Browser reader. One worker owns the Playwright instance and its profile."""
+"""MOOC reader. The caller supplies the embedded browser it should drive.
+
+Reading always goes through a context provider, which the desktop program sets
+to the QtWebEngine adapter. Without one there is no browser to read with, so
+`ensure` reports that instead of quietly doing nothing.
+"""
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
 import re
 import time
 
@@ -13,15 +17,6 @@ class LoginRequired(RuntimeError):
     pass
 
 
-def configure_runtime_temp(folder):
-    # The driver uses Node's TEMP rather than Python's writable-temp fallback.
-    temp = Path(folder).resolve() / 'runtime-temp'
-    temp.mkdir(parents=True, exist_ok=True)
-    os.environ['TEMP'] = str(temp)
-    os.environ['TMP'] = str(temp)
-    return temp
-
-
 @dataclass
 class ScanResult:
     items: list = field(default_factory=list)
@@ -30,17 +25,21 @@ class ScanResult:
     errors: list = field(default_factory=list)
     account_id: str = ''
 
+ 
+def _is_empty(data):
+    """True when a script result reports 'nothing here' rather than content."""
+    return ((isinstance(data, list) and not data)
+            or (isinstance(data, dict) and data.get('empty') and not data.get('rows')))
+
 
 class MoocBrowser:
     def __init__(self, folder, progress=lambda text: None, cancelled=lambda: False, context_provider=None):
         self.folder = Path(folder)
         self.progress = progress
-        self.pw = None
         self.context = None
         self.headless = None
         self.account = ''
         self.cancelled = cancelled
-        self.native = None
         self.context_provider = context_provider
 
     def _check_cancel(self):
@@ -49,41 +48,16 @@ class MoocBrowser:
 
     def close(self):
         try:
-            if self.native:
-                self.native.close()
-                self.native = None
-            elif self.context:
+            if self.context:
                 self.context.close()
         finally:
             self.context = None
-            if self.pw:
-                self.pw.stop()
-            self.pw = None
 
     def ensure(self, headless=True, user_id=''):
-        if self.context_provider:
-            self.context = self.context_provider(user_id, not headless, self.cancelled)
-            self.headless, self.account = headless, user_id
-            return self.context
-        from playwright.sync_api import sync_playwright
-        configure_runtime_temp(self.folder)
-        if self.context and self.headless == headless and self.account == user_id:
-            try:
-                self.context.new_page().close()
-                return self.context
-            except Exception:
-                self.close()
-        elif self.context:
-            self.close()
-        if not self.pw:
-            self.pw = sync_playwright().start()
-        from native_browser import NativeBrowser
-        self.native = NativeBrowser(self.folder / 'native-profiles' / (user_id or 'default'), self.cancelled, self.progress)
-        browser = self.native.start(self.pw, headless=headless, url='about:blank')
-        self.context = browser.contexts[0]
-        self.context.set_default_timeout(12000)
-        self.headless = headless
-        self.account = user_id
+        if not self.context_provider:
+            raise RuntimeError('没有可用的内置浏览器，无法读取课程。请通过“启动MoocReminder.bat”启动程序。')
+        self.context = self.context_provider(user_id, not headless, self.cancelled)
+        self.headless, self.account = headless, user_id
         return self.context
 
     def login(self, home_url):
@@ -114,8 +88,7 @@ class MoocBrowser:
             self._check_cancel()
             data = page.evaluate(script)
             if ready(data):
-                is_empty = (isinstance(data, list) and not data) or (isinstance(data, dict) and data.get('empty') and not data.get('rows'))
-                if not is_empty and data == last and stable_since and time.monotonic() - stable_since >= 1.5:
+                if not _is_empty(data) and data == last and stable_since and time.monotonic() - stable_since >= 1.5:
                     return data
                 if data != last:
                     stable_since = time.monotonic()
@@ -124,7 +97,10 @@ class MoocBrowser:
                 last = None
                 stable_since = None
             page.wait_for_timeout(350)
-        if last is not None and stable_since and time.monotonic() - stable_since >= 1.5 and ready(last):
+        # The fallback must reject a result that is merely stable: an empty list
+        # that never fills in means the page did not finish loading, and
+        # accepting it would report the course as having no assignments.
+        if last is not None and ready(last) and not _is_empty(last) and stable_since and time.monotonic() - stable_since >= 1.5:
             return last
         raise RuntimeError('页面数据未完成加载，或官网页面结构发生变化；已保留上次结果。')
 

@@ -5,10 +5,37 @@ from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
-from core import Course, parse_deadline, parse_assignment, normalize_course_url, due_reminders
+from core import (Course, parse_deadline, parse_assignment, normalize_course_url, due_reminders,
+                  binding_state, is_bound, DEFAULT_SETTINGS)
 from storage import Store, default_data_dir
 
 TZ = timezone(timedelta(hours=8))
+HOME_REAL = 'https://www.icourse163.org/home.htm?userId=123456#/home/course'
+
+
+class BindingStateTests(unittest.TestCase):
+    def test_placeholder_home_url_is_not_bound(self):
+        state = binding_state(dict(home_url=DEFAULT_SETTINGS['home_url'], email=dict(recipient='me@qq.com')))
+        self.assertEqual(state, dict(mooc=False, email=True))
+
+    def test_real_user_id_counts_as_bound(self):
+        settings = dict(home_url=HOME_REAL, email=dict(recipient='me@qq.com'))
+        self.assertEqual(binding_state(settings), dict(mooc=True, email=True))
+        self.assertTrue(is_bound(settings))
+
+    def test_email_whitespace_does_not_count_as_bound(self):
+        self.assertFalse(binding_state(dict(home_url=HOME_REAL, email=dict(recipient='   ')))['email'])
+
+    def test_missing_settings_are_reported_as_unbound(self):
+        self.assertEqual(binding_state({}), dict(mooc=False, email=False))
+
+    def test_loading_an_unbound_profile_is_still_accepted(self):
+        # The placeholder must load, or existing users would look like corruption.
+        with tempfile.TemporaryDirectory() as folder:
+            Store(folder).save()
+            reopened = Store(folder)
+            self.assertEqual(reopened.warning, '')
+            self.assertFalse(reopened.is_bound())
 
 
 class CoreTests(unittest.TestCase):

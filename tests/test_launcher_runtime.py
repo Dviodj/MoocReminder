@@ -34,19 +34,18 @@ class LauncherRuntimeTests(unittest.TestCase):
     def fixture(self, root):
         python = root/'.venv/Scripts/python.exe'
         artifacts = [python, root/'.venv/pyvenv.cfg', root/'requirements-runtime.txt',
-            root/'webview_runtime.py', root/'qt_bootstrap.py',
+            root/'qt_bootstrap.py',
             root/'.venv/Lib/site-packages/PySide6/QtCore.pyd',
             root/'.venv/Lib/site-packages/PySide6/QtWidgets.pyd',
-            root/'.venv/Lib/site-packages/pythonnet/__init__.py',
-            root/'.native-webview/Microsoft.Web.WebView2.Core.dll',
-            root/'.native-webview/Microsoft.Web.WebView2.WinForms.dll',
-            root/'.native-webview/WebView2Loader.dll']
+            root/'.venv/Lib/site-packages/PySide6/QtWebEngineCore.pyd',
+            root/'.venv/Lib/site-packages/PySide6/QtWebEngineWidgets.pyd',
+            root/'.venv/Lib/site-packages/PySide6/QtWebEngineProcess.exe']
         for file in artifacts:
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b'fixture')
         return python
 
-    def test_cache_invalidates_when_dependency_or_sdk_changes(self):
+    def test_cache_invalidates_when_dependency_or_webengine_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); python = self.fixture(root)
             initial = launcher.cache_fingerprint(root, python)
@@ -54,12 +53,12 @@ class LauncherRuntimeTests(unittest.TestCase):
             (root/'requirements-runtime.txt').write_text('changed requirements')
             self.assertNotEqual(initial, launcher.cache_fingerprint(root, python))
             before = launcher.cache_fingerprint(root, python)
-            (root/'.native-webview/WebView2Loader.dll').write_bytes(b'new SDK')
+            (root/'.venv/Lib/site-packages/PySide6/QtWebEngineProcess.exe').write_bytes(b'new engine')
             self.assertNotEqual(before, launcher.cache_fingerprint(root, python))
             (root/'.venv/Lib/site-packages/PySide6/QtWidgets.pyd').unlink()
             self.assertIsNone(launcher.cache_fingerprint(root, python))
 
-    def test_warm_start_skips_dependency_install_and_clr_preflight(self):
+    def test_warm_start_skips_probing_and_installation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); python = self.fixture(root)
             (root/'.launcher-state').mkdir()

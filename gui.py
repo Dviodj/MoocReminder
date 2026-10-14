@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox, filedialog
 import webbrowser
 
 from core import BEIJING, now_beijing, due_reminders, remaining_text, valid_home_url, normalize_course_url, account_id
+from version import VERSION
 from worker import BrowserWorker
 
 
@@ -42,7 +43,7 @@ class App:
         return max(5, int(self.store.data['settings']['interval_minutes'])) * 60
 
     def _build(self):
-        self.root.title('MoocReminder · 作业截止提醒 v0.1')
+        self.root.title('MoocReminder · 作业截止提醒 ' + VERSION)
         self.root.geometry('1180x740')
         self.root.minsize(980, 600)
         self.root.configure(bg='#f3f6fb')
