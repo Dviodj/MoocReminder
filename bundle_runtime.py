@@ -30,7 +30,10 @@ PACKAGES = {'PySide6-Essentials': '6.12.0', 'PySide6-Addons': '6.12.0',
 
 # Parts of a full CPython distribution a shipped program never uses.
 PYTHON_DROP = ('Lib/test', 'Lib/idlelib', 'Lib/turtledemo', 'Lib/lib2to3', 'include', 'Doc',
-               'Tools', 'Scripts', 'libs')
+               'Tools', 'Scripts', 'libs',
+               # The portable package never installs anything, so pip and its
+               # bundled wheels are dead weight.
+               'Lib/ensurepip', 'Lib/site-packages/pip', 'Lib/site-packages/pip-*.dist-info')
 # Optional Qt modules the program does not import. Only their Python bindings
 # (.pyd) and type stubs (.pyi) are removed: the matching Qt6*.dll files stay,
 # because other modules link against them — QtWebEngineCore, for example, needs
@@ -82,7 +85,11 @@ def extract_python(archive, target):
     with zipfile.ZipFile(archive) as bundle:
         bundle.extractall(target)
     for relative in PYTHON_DROP:
-        shutil.rmtree(target/relative, ignore_errors=True)
+        for match in target.glob(relative):
+            if match.is_dir():
+                shutil.rmtree(match, ignore_errors=True)
+            else:
+                match.unlink(missing_ok=True)
     for stray in target.glob('*.pdb'):
         stray.unlink(missing_ok=True)
 

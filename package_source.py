@@ -36,8 +36,11 @@ def package(with_runtime=False):
         if manifest['platform']!='win_amd64':
             raise RuntimeError('Only a completed Windows x64 runtime bundle can be packaged.')
         # Every distributed component keeps its own license text next to it.
+        # The bundle ships an interpreter, so the wheels live under its
+        # site-packages rather than in a shared folder.
+        site = bundle/'python/Lib/site-packages'
         component_licenses = {}
-        for distribution in sorted(bundle.glob('common/*.dist-info')):
+        for distribution in sorted(site.glob('*.dist-info')):
             component_licenses[distribution.name] = [file.name for folder in sorted(distribution.glob('licenses'))
                 if folder.is_dir() for file in sorted(folder.rglob('*')) if file.is_file()]
         if not component_licenses:
@@ -45,6 +48,10 @@ def package(with_runtime=False):
         missing = [name for name, found in component_licenses.items() if not found]
         if missing:
             raise RuntimeError('Missing license text for: ' + ', '.join(missing))
+        # The bundled interpreter carries its own license.
+        python_license = bundle/'python/LICENSE.txt'
+        if not python_license.is_file():
+            raise RuntimeError('The bundled interpreter is missing its license text.')
         for required in LICENSE_TEXTS + UNTRACKED_RELEASE_INPUTS:
             if not (ROOT/required).is_file():
                 raise RuntimeError('Missing release input: ' + required)
@@ -57,12 +64,10 @@ def package(with_runtime=False):
         # must sit where the launcher looks for it, exactly as in a published
         # package, so an extracted offline package starts offline.
         bundle_prefix = bundle.relative_to(ROOT).as_posix() + '/'
-        # License texts and the notices file are release inputs added here, so
-        # they ship even before they are staged in git.
+        # License texts and the notices file are release inputs: tracked copies
+        # are already listed, and any that are not staged yet are added here.
         for extra in LICENSE_TEXTS + UNTRACKED_RELEASE_INPUTS:
-            if extra in entries:
-                raise RuntimeError('Release input would overwrite a tracked file: ' + extra)
-            entries[extra] = extra
+            entries.setdefault(extra, extra)
         for name in bundle_files:
             # rglob yields paths relative to the bundle, so the bundle's own
             # folder name has to be restored on the archive path.
