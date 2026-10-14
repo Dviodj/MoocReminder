@@ -2,19 +2,31 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.build-temp/
-.build-cache/
 build/
 dist/
-releases/
-.launcher-state/
 .tools/
 .github-publish/
-data/
-*-profiles/
+*_check/
 *-check/
 qt-test-data/
 qt-smoke/
+
+# Everything a build, a release or a test run produces lives under .build/.
+# See docs/STRUCTURE.md for what each subfolder holds.
+.build/
+.build-temp/
+.build-cache/
+releases/
+.runtime-bundle/
+.bundle-downloads/
+
+# Launcher runtime state stays at the root: published offline packages and
+# release fixtures expect it there.
+.launcher-state/
+
+# Local account data, browser profiles and credentials never leave the machine.
+data/
+*-profiles/
 .env
 .env.*
 *.pem
@@ -27,6 +39,9 @@ qt-smoke/
 /*.png
 tmp*/
 *.tmp
+# A pip killed mid-install leaves its scratch directories in the working
+# directory instead of TEMP, so ignore them at any depth.
+pip-*/
+pip-*.tmp/
+temp-*/
 .superpowers/
-.runtime-bundle/
-.bundle-downloads/

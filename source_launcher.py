@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from desktop_shortcut import create_desktop_shortcut
@@ -53,7 +54,15 @@ def probe_python(executable, cancelled=None):
     return None
 
 
+def bundled_python(workspace):
+    """The interpreter shipped inside the package, if it is present."""
+    return artifact_root(workspace, 'runtime-bundle', 'python', 'python.exe')
+
+
 def candidates(workspace):
+    # The interpreter shipped in the package comes first: it is the only one the
+    # release is verified against, and it needs nothing installed on the machine.
+    yield bundled_python(workspace)
     yield os.environ.get('MOOC_PYTHON')
     try:
         yield json.loads((workspace/'.launcher-state/runtime.json').read_text(encoding='utf-8'))['python']
@@ -98,6 +107,72 @@ def runtime_plan(workspace, cancelled=None):
     raise RuntimeError('未找到 Python 3.11 以上的 64 位运行环境；原生网页组件需要 Python 3.11 或更高版本。')
 
 
+def artifact_root(workspace, *relative):
+    """Locate a build artifact under workspace/.build first, then fall back to
+    the pre-0.1.2 root layout (where the folder name kept its leading dot), so
+    already published offline packages keep working. Paths resolve against the
+    workspace, never the process CWD."""
+    workspace = Path(workspace)
+    relative = tuple(relative)
+    current = workspace/'.build'/Path(*relative)
+    candidates = [current, workspace/Path(*relative)]
+    if relative and not str(relative[0]).startswith('.'):
+        candidates.append(workspace/Path('.' + relative[0], *relative[1:]))
+    return next((path for path in candidates if path.exists()), current)
+
+
+# PowerShell snippets with {path} substituted. Reading the Zone.Identifier
+# stream from Python is not possible: Windows denies deleting or rewriting it,
+# and its text listing is localised. The path is inlined rather than passed as
+# an argument because `powershell -Command` does not populate $args with the
+# trailing parameters.
+_BLOCKED_QUERY = """param([string]$Root)
+Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
+  Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue } |
+  ForEach-Object { $_.FullName }
+"""
+
+def blocked_files(workspace):
+    """Files Windows still marks as downloaded from the internet.
+
+    That mark is an alternate data stream named Zone.Identifier. Windows shows a
+    publisher warning for such files and refuses to run the launcher scripts, so
+    a fresh download appears broken for no visible reason.
+    """
+    if os.name != 'nt':
+        return []
+    listing, _ = _run_script(_BLOCKED_QUERY, workspace)
+    return [Path(line.strip()) for line in listing.splitlines()
+            if line.strip() and Path(line.strip()).is_file()]
+
+
+def _run_script(script, workspace):
+    """Run a PowerShell script file against a workspace path.
+
+    The script is written to a file rather than passed with -Command: the
+    command line mangles paths containing quotes and Windows caps its length.
+    """
+    powershell = Path(os.environ.get('SystemRoot', 'C:/Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
+    handle = None
+    try:
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8-sig', suffix='.ps1', delete=False) as stream:
+            handle = Path(stream.name)
+            stream.write(script)
+        result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', str(handle), str(Path(workspace))],
+            capture_output=True, timeout=600, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        text = result.stdout.decode('utf-8', errors='replace')
+    except (OSError, subprocess.TimeoutExpired):
+        return '', 0
+    finally:
+        if handle is not None:
+            try:
+                handle.unlink()
+            except OSError:
+                pass
+    return text, len([line for line in text.splitlines() if line.strip()])
+
+
 def stop_started_app(process):
     if process.poll() is not None:
         return
@@ -122,24 +197,19 @@ def stop_started_app(process):
 def cache_fingerprint(workspace, python):
     workspace, python = Path(workspace), Path(python)
     prefix = python.parent.parent if python.parent.name.lower() == 'scripts' else python.parent
-    bundle = workspace/'.runtime-bundle'
+    bundle = artifact_root(workspace, 'runtime-bundle')
     site = bundle/'common' if (bundle/'bundle.json').is_file() else prefix/'Lib/site-packages'
-    required = [python, workspace/'requirements-runtime.txt', workspace/'webview_runtime.py',
+    required = [python, workspace/'requirements-runtime.txt',
         workspace/'qt_bootstrap.py', site/'PySide6/QtCore.pyd', site/'PySide6/QtWidgets.pyd',
-        site/'pythonnet/__init__.py']
-    required += [workspace/'.native-webview'/name for name in (
-        'Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.WinForms.dll','WebView2Loader.dll')]
+        site/'PySide6/QtWebEngineCore.pyd', site/'PySide6/QtWebEngineWidgets.pyd',
+        site/'PySide6/QtWebEngineProcess.exe']
     try:
         stamps = [(str(file.resolve()), file.stat().st_size, file.stat().st_mtime_ns) for file in required]
         optional = [prefix/'pyvenv.cfg', workspace/'source_launcher.py',bundle/'bundle.json']
-        optional += list((bundle/'native').glob('*/*.pyd'))
         optional += list(site.glob('pyside6_essentials-*.dist-info/METADATA'))
-        optional += list(site.glob('pythonnet-*.dist-info/METADATA'))
+        optional += list(site.glob('pyside6_webengine-*.dist-info/METADATA'))
         stamps += [(str(file.resolve()), file.stat().st_size, file.stat().st_mtime_ns) for file in optional if file.exists()]
-        dotnet = Path(os.environ.get('ProgramW6432', os.environ.get('ProgramFiles','C:/Program Files')))/'dotnet/shared'
-        frameworks = sorted(str(p) for family in ('Microsoft.NETCore.App','Microsoft.WindowsDesktop.App')
-            for p in (dotnet/family).glob('*') if p.is_dir())
-        payload = [stamps, frameworks, os.environ.get('MOOC_PYTHON',''),os.environ.get('DOTNET_ROOT',''),os.environ.get('DOTNET_ROOT_X64',''),
+        payload = [stamps, os.environ.get('MOOC_PYTHON',''),
             hashlib.sha256((workspace/'requirements-runtime.txt').read_bytes()).hexdigest()]
         return hashlib.sha256(json.dumps(payload).encode('utf-8')).hexdigest()
     except OSError:
@@ -157,7 +227,7 @@ def probe_app_runtime(python, workspace, cancelled=None):
                 expected[name] = version
         code = ('import sys,struct,json,importlib.metadata as m; '
             'from qt_bootstrap import prepare_qt; prepare_qt("data"); '
-            'from PySide6 import QtCore,QtWidgets; import pythonnet; '
+            'from PySide6 import QtCore,QtWidgets,QtWebEngineCore,QtWebEngineWidgets; '
             'print(json.dumps(dict(version=list(sys.version_info[:3]),bits=struct.calcsize("P")*8,'
             'base_python=getattr(sys,"_base_executable",sys.executable),deps={n:m.version(n) for n in '+repr(list(expected))+'})))')
         if cancelled is not None:
@@ -212,24 +282,29 @@ def run_command(args, workspace, log, cancelled=lambda:False, timeout=120, env=N
 
 
 def bundled_environment(workspace, version):
-    bundle = Path(workspace)/'.runtime-bundle'
+    bundle = artifact_root(workspace, 'runtime-bundle')
     tag = 'cp'+str(version[0])+str(version[1])
     try:
         manifest = json.loads((bundle/'bundle.json').read_text(encoding='utf-8'))
-        if manifest['platform'] != 'win_amd64' or tag not in manifest['python_tags']:
+        if manifest['platform'] != 'win_amd64' or tag not in manifest.get('python_tags', [tag]):
             return None
-        common, native = bundle/'common', bundle/'native'/tag
-        if not (common/'PySide6/QtWidgets.pyd').is_file() or not (common/'pythonnet/__init__.py').is_file() or not list(native.glob('_cffi_backend.*.pyd')):
+        # The interpreter ships inside the bundle, with the Qt wheels next to it.
+        python = bundle/'python'
+        site = python/'Lib/site-packages'
+        if (not (python/'python.exe').is_file()
+                or not (site/'PySide6/QtWidgets.pyd').is_file()
+                or not (site/'PySide6/QtWebEngineCore.pyd').is_file()
+                or not (site/'PySide6/QtWebEngineProcess.exe').is_file()):
             return None
-        paths = [str(common),str(native)]
+        paths = [str(site)]
         if os.environ.get('PYTHONPATH'):
             paths.append(os.environ['PYTHONPATH'])
         # A machine may have another Qt distribution (for example Anaconda).
         # Explicit paths keep the bundled Qt DLLs and platform plugins together.
-        return dict(os.environ,PYTHONPATH=os.pathsep.join(paths),PYTHONIOENCODING='utf-8',
-            QT_PLUGIN_PATH=str(common/'PySide6/plugins'),
-            QT_QPA_PLATFORM_PLUGIN_PATH=str(common/'PySide6/plugins/platforms'))
-    except (OSError,ValueError,KeyError,TypeError):
+        return dict(os.environ, PYTHONPATH=os.pathsep.join(paths), PYTHONIOENCODING='utf-8',
+            QT_PLUGIN_PATH=str(site/'PySide6/plugins'),
+            QT_QPA_PLATFORM_PLUGIN_PATH=str(site/'PySide6/plugins/platforms'))
+    except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
@@ -284,7 +359,7 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
     update(4,'检查电脑环境','正在准备 MoocReminder。')
     state = workspace/'.launcher-state'
     state.mkdir(parents=True, exist_ok=True)
-    temp = workspace/'.build-temp';temp.mkdir(parents=True,exist_ok=True)
+    temp = workspace/'.build/temp';temp.mkdir(parents=True,exist_ok=True)
     preparation_env = dict(os.environ,TEMP=str(temp),TMP=str(temp),PYTHONIOENCODING='utf-8')
     log_path = state/'startup.log'
     with log_path.open('a', encoding='utf-8') as log:
@@ -303,7 +378,7 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
         else:
             plan = runtime_plan(workspace,cancelled=cancelled)
         bundle_env = bundled_environment(workspace,plan['version'])
-        if (workspace/'.runtime-bundle/bundle.json').is_file() and bundle_env is None:
+        if artifact_root(workspace, 'runtime-bundle', 'bundle.json').is_file() and bundle_env is None:
             raise RuntimeError('离线运行组件不完整，或 Python 版本不受支持。请完整解压运行包并使用 64 位 Python 3.11–3.15。')
         if bundle_env:
             python = Path(plan['python'])
@@ -322,14 +397,15 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
         info = plan.get('app_info',plan)
         (state/'runtime.json').write_text(json.dumps({'python':str(Path(info['base_python']).resolve()),'app_python':str(python)}), encoding='utf-8')
         expected = dict(line.strip().split('==',1) for line in (workspace/'requirements-runtime.txt').read_text(encoding='utf-8-sig').splitlines() if '==' in line and not line.startswith('#')) if (workspace/'requirements-runtime.txt').exists() else {}
-        check = ('from qt_bootstrap import prepare_qt; prepare_qt("data"); from PySide6 import QtCore,QtWidgets; import pythonnet; '
+        check = ('from qt_bootstrap import prepare_qt; prepare_qt("data"); '
+            'from PySide6 import QtCore,QtWidgets,QtWebEngineCore,QtWebEngineWidgets; '
             'import importlib.metadata as m; assert {n:m.version(n) for n in '+repr(list(expected))+'} == '+repr(expected))
         if not warm and (not reused or bundle_env) and run_command([python,'-c',check],workspace,log,cancelled,timeout=25,env=bundle_env or preparation_env):
             if bundle_env:
                 raise RuntimeError('随包运行组件未能加载，请完整重新解压运行包，详情见启动日志。')
             update(40,'下载首次运行文件','第一次需要下载界面组件。完成后再次启动会直接复用。',True)
             print('正在安装或修复桌面组件…', flush=True)
-            temp = workspace/'.build-temp'
+            temp = workspace/'.build/temp'
             temp.mkdir(parents=True, exist_ok=True)
             install_env = dict(os.environ, TEMP=str(temp), TMP=str(temp))
             result = run_command([python,'-m','pip','install','--no-cache-dir','--no-build-isolation',
@@ -337,9 +413,7 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
                 workspace,log,cancelled,timeout=600,env=install_env)
             if result or run_command([python,'-c',check],workspace,log,cancelled,timeout=25,env=preparation_env):
                 raise RuntimeError('桌面组件未能加载，详情已写入启动日志。')
-        update(65,'准备登录组件','已验证的组件会在后续启动时直接复用。',not warm)
-        if not warm and run_command([python,'webview_runtime.py','--prepare'],workspace,log,cancelled,timeout=90,env=bundle_env or preparation_env):
-            raise RuntimeError('原生网页组件未能加载，详情已写入启动日志。')
+        update(65,'准备网页组件','已验证的组件会在后续启动时直接复用。',not warm)
         update(78,'创建桌面入口','以后可以直接从桌面打开。')
         try:
             create_desktop_shortcut(workspace,cancelled=cancelled)
@@ -402,8 +476,21 @@ def main():
     parser.add_argument('--check-runtime', action='store_true')
     parser.add_argument('--probe-python')
     parser.add_argument('--wait', action='store_true')
+    parser.add_argument('--unblock', action='store_true')
     args, app_args = parser.parse_known_args()
     workspace = Path(args.workspace).resolve()
+    if args.unblock:
+        blocked = blocked_files(workspace)
+        if not blocked:
+            print('没有发现被 Windows 标记为“来自网络”的文件。')
+            return 0
+        print(f'发现 {len(blocked)} 个文件带有“来自网络”的标记：')
+        for path in blocked[:10]:
+            print('  ' + str(path))
+        if len(blocked) > 10:
+            print(f'  …以及另外 {len(blocked) - 10} 个')
+        print('请重新解压发布包，或右键这些文件→属性→勾选“解除锁定”。')
+        return 0
     if args.probe_python:
         info = probe_python(args.probe_python)
         print(json.dumps(dict(supported=bool(info), info=info)))

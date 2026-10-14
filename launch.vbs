@@ -34,7 +34,7 @@ If python = "" Then
     If probeOnly Then
         WScript.Echo "No usable Python/Tk interpreter." & vbCrLf & failures
     Else
-        MsgBox "Unable to open the startup window. Install or repair Python 3.9 or later with Tcl/Tk, then retry." & vbCrLf & "You can also run launch.bat --check-runtime for diagnostics." & vbCrLf & "Startup log: " & folder & "\.launcher-state\startup.log" & vbCrLf & failures, 16, "MoocReminder"
+        MsgBox "Unable to open the startup window. Install or repair Python 3.9 or later with Tcl/Tk, then retry." & vbCrLf & "You can also run 启动MoocReminder.bat --check-runtime for diagnostics." & vbCrLf & "Startup log: " & folder & "\.launcher-state\startup.log" & vbCrLf & failures, 16, "MoocReminder"
     End If
     WScript.Quit 1
 End If
