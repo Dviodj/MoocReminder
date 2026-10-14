@@ -28,6 +28,10 @@ class BrowserWorker(threading.Thread):
                     if command == 'login':
                         self.browser.login(settings['home_url'])
                         self.events.put(('login_ready', None))
+                    elif command == 'cookie_login':
+                        count = self.browser.login_with_cookies(settings['home_url'],
+                                                                settings.get('cookies', ''))
+                        self.events.put(('cookie_ready', count))
                     elif command == 'scan':
                         result = self.browser.scan(settings)
                         self.events.put(('result', result))

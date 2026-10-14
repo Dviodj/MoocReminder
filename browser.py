@@ -32,6 +32,28 @@ def _is_empty(data):
             or (isinstance(data, dict) and data.get('empty') and not data.get('rows')))
 
 
+# Cookies the MOOC site issues; anything else in a pasted header is ignored so a
+# user cannot accidentally hand over unrelated sessions.
+MOOC_COOKIE_NAMES = ('NTESSTUDYSI', 'STUDY_SESS', 'STUDY_INFO', 'EDUWEBDEVICE', 'P_INFO',
+                     'NTES_SESS', 'S_INFO', 'STUDY_PERSIST')
+
+
+def parse_cookie_header(pasted):
+    """Read a Cookie header copied from a browser into (name, value, domain)."""
+    pairs = []
+    for chunk in re.split(r'[;\n\r]+', str(pasted or '')):
+        chunk = chunk.strip()
+        if not chunk or '=' not in chunk:
+            continue
+        name, _, value = chunk.partition('=')
+        name, value = name.strip(), value.strip().strip('"')
+        if not name or not value:
+            continue
+        if name in MOOC_COOKIE_NAMES:
+            pairs.append((name, value, '.icourse163.org'))
+    return pairs
+
+
 class MoocBrowser:
     def __init__(self, folder, progress=lambda text: None, cancelled=lambda: False, context_provider=None):
         self.folder = Path(folder)
@@ -69,6 +91,29 @@ class MoocBrowser:
         page.goto('https://www.icourse163.org/', wait_until='commit', timeout=12000)
         page.bring_to_front()
         self.progress('请在打开的浏览器中登录。登录完成后返回本程序，点击“检查作业”。')
+
+    def login_with_cookies(self, home_url, pasted):
+        """Sign in by installing cookies copied from the user's own browser.
+
+        The fallback for environments where the built-in window cannot complete
+        a login. The pasted session is verified against the MOOC site, so a bad
+        or expired paste is reported instead of silently producing no data.
+        """
+        if not valid_home_url(home_url):
+            raise ValueError('课程主页须是慕课官网 /home.htm?userId=数字')
+        cookies = parse_cookie_header(pasted)
+        if not cookies:
+            raise ValueError('没有解析出任何 Cookie。请从浏览器开发者工具复制 Cookie 请求头。')
+        context = self.ensure(headless=True, user_id=account_id(home_url))
+        context.apply_cookies(cookies)
+        page = context.new_page()
+        try:
+            self._goto(page, home_url)
+            self._verify_account(page, account_id(home_url))
+        finally:
+            page.close()
+        self.progress(f'已用粘贴的 Cookie 登录，共 {len(cookies)} 项。')
+        return len(cookies)
 
     def _goto(self, page, url):
         self._check_cancel()

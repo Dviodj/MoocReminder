@@ -12,6 +12,7 @@ import time
 from urllib.parse import urljoin
 
 from PySide6.QtCore import QObject, Signal, Slot, QUrl, qVersion
+from PySide6.QtNetwork import QNetworkCookie
 from PySide6.QtWidgets import QMainWindow, QLineEdit, QVBoxLayout, QWidget, QLabel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineLoadingInfo
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -179,6 +180,25 @@ class Context:
         # Login pages share the same profile with background reader pages.
         # The manager owns the profile until the app exits.
         pass
+
+    def apply_cookies(self, cookies):
+        """Install cookies copied from another browser, then verify they work.
+
+        Some environments cannot complete an interactive login (a locked-down
+        machine, a browser that refuses to open, an account with an unusual
+        verification step), so the user may paste the session cookies their own
+        browser already holds instead.
+        """
+        store = self.profile.cookieStore()
+        written = []
+        for name, value, domain in cookies:
+            cookie = QNetworkCookie(name.encode('utf-8'), value.encode('utf-8'))
+            cookie.setDomain(domain)
+            cookie.setPath('/')
+            cookie.setSecure(True)
+            store.setCookie(cookie, QUrl('https://' + domain.lstrip('.') + '/'))
+            written.append(name)
+        return written
 
 
 class Page:
