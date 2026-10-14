@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 
 from storage import Store
 from version import APP_NAME, VERSION
@@ -13,13 +14,16 @@ from qt_bootstrap import prepare_qt
 _data = Path(__file__).parent / 'data'
 prepare_qt(_data)
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
-    QSpinBox, QPlainTextEdit, QMessageBox, QFrame)
+    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame)
 from portal import Controller
-from webview2_reader import Manager
+import emailer
+import profiles as profiles_module
+from core import account_id, binding_state as core_binding_state
+from qt_reader import Manager
 
 STYLE = '''
 QMainWindow,QDialog{background:#e9edf4;color:#344053;font-family:"Microsoft YaHei UI";font-size:12px}
@@ -41,12 +45,275 @@ QCheckBox{color:#9aa6ba;padding:8px}QScrollBar:vertical{background:#f6f8fc;width
 '''
 
 
+class EmailSettingsForm(QWidget):
+    """Email reminder fields; testable on its own without the main window.
+
+    The authorization code follows one rule: only a value the user actually
+    typed is submitted, so leaving the field blank keeps the stored secret.
+    """
+
+    test_requested = Signal(dict)
+
+    def __init__(self, email, parent=None):
+        super().__init__(parent)
+        email = dict(email or {})
+        self.saved_password = bool(emailer.password_saved(email.get('password', '')))
+        self.forget_password = False
+        self.password_touched = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setSpacing(8)
+        self.enabled = QCheckBox('开启邮件提醒')
+        self.enabled.setChecked(bool(email.get('enabled')))
+        layout.addWidget(self.enabled)
+        form = QFormLayout()
+        self.recipient = QLineEdit(str(email.get('recipient', '')))
+        self.recipient.setPlaceholderText('例如 you@qq.com')
+        self.sender = QLineEdit(str(email.get('sender', '')))
+        self.sender.setPlaceholderText('默认使用收件邮箱本身')
+        self.server = QLineEdit(str(email.get('server', '')))
+        self.server.setPlaceholderText('填入收件邮箱后自动识别，例如 smtp.qq.com')
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setValue(int(email.get('port', emailer.DEFAULT_PORT)))
+        self.security = QComboBox()
+        self.security.addItem('SSL（常用 465）', 'ssl')
+        self.security.addItem('STARTTLS（常用 587）', 'starttls')
+        index = self.security.findData(str(email.get('security', 'ssl')))
+        self.security.setCurrentIndex(max(0, index))
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText('已保存，留空则不修改' if self.saved_password else '邮箱授权码，不是登录密码')
+        self.digest = QLineEdit(','.join(email.get('digest_times', []) or []))
+        self.digest.setPlaceholderText('例如 08:00,20:00，留空则只按截止时间提醒')
+        form.addRow('接收提醒的邮箱', self.recipient)
+        form.addRow('发件邮箱', self.sender)
+        form.addRow('邮件服务器', self.server)
+        form.addRow('端口', self.port)
+        form.addRow('加密方式', self.security)
+        form.addRow('授权码', self.password)
+        form.addRow('每日发信时刻', self.digest)
+        layout.addLayout(form)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setObjectName('muted')
+        layout.addWidget(self.hint)
+        state = QHBoxLayout()
+        self.test_button = QPushButton('发送测试邮件')
+        self.clear_password = QPushButton('清除已保存的授权码')
+        self.clear_password.setVisible(self.saved_password)
+        state.addWidget(self.test_button)
+        state.addWidget(self.clear_password)
+        state.addStretch()
+        layout.addLayout(state)
+        note = QLabel('授权码加密后仅保存在本机；程序需要在运行才能发信，关机期间不会发送。')
+        note.setObjectName('muted')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.recipient.textChanged.connect(self.autofill)
+        self.password.textEdited.connect(self.mark_password)
+        self.clear_password.clicked.connect(self.forget)
+        self.test_button.clicked.connect(self.request_test)
+        self.autofill(self.recipient.text())
+
+    def mark_password(self, *_):
+        self.password_touched = True
+        self.forget_password = False
+
+    def forget(self):
+        self.password.clear()
+        self.forget_password = True
+        self.saved_password = False
+        self.clear_password.setVisible(False)
+        self.hint.setText('保存后本机不再保留授权码，需要重新填写才能发信。')
+
+    def autofill(self, text):
+        """Suggest a provider preset until the user edits the server manually."""
+        self.test_button.setEnabled(bool(str(text).strip()))
+        preset = emailer.suggest_server(text)
+        if not preset:
+            self.hint.setText('未识别该邮箱服务商，请手动填写邮件服务器与端口。' if str(text).strip() else '')
+            return
+        if not self.server.text().strip() or self.server.text().strip() in self.suggested_servers():
+            self.server.setText(preset['server'])
+            self.port.setValue(preset['port'])
+            index = self.security.findData(preset['security'])
+            if index >= 0:
+                self.security.setCurrentIndex(index)
+            self.hint.setText(f'已按 {preset["server"]} 自动填写，可按服务商说明调整。')
+
+    @staticmethod
+    def suggested_servers():
+        return {preset['server'] for preset in emailer.PRESETS.values()}
+
+    def values(self):
+        """Return the settings patch; omit the code unless the user typed one."""
+        config = dict(enabled=self.enabled.isChecked(), recipient=self.recipient.text().strip(),
+                      sender=self.sender.text().strip(), server=self.server.text().strip(),
+                      port=self.port.value(), security=self.security.currentData(),
+                      digest_times=[part.strip() for part in self.digest.text().replace('，', ',').split(',') if part.strip()])
+        if self.password.text() or self.forget_password:
+            config['password'] = self.password.text()
+        return config
+
+    def request_test(self):
+        if not self.recipient.text().strip():
+            self.hint.setText('请先填写接收提醒的邮箱。')
+            return
+        self.hint.setText('正在发送测试邮件…')
+        self.test_requested.emit(self.values())
+
+
+class RegisterDialog(QDialog):
+    """Create an account from a name alone; MOOC and email are bound after entering."""
+
+    def __init__(self, profiles, parent=None):
+        super().__init__(parent)
+        self.profiles = profiles
+        self.key = None
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle('注册账号')
+        self.resize(520, 280)
+        layout = QVBoxLayout(self)
+        title = QLabel('新建一个账号'); title.setObjectName('sectionTitle'); layout.addWidget(title)
+        intro = QLabel('先用账号名称建好，进入后再绑定慕课账号与邮箱。每个账号的作业、完成标记与邮箱设置相互独立。')
+        intro.setWordWrap(True); intro.setObjectName('muted'); layout.addWidget(intro)
+        form = QFormLayout()
+        self.name = QLineEdit()
+        self.name.setPlaceholderText('例如：主账号、选修课账号')
+        form.addRow('账号名称', self.name)
+        layout.addLayout(form)
+        self.error = QLabel(''); self.error.setObjectName('muted'); self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        layout.addStretch()
+        buttons = QHBoxLayout()
+        self.submit = QPushButton('注册并进入'); self.submit.setObjectName('primary')
+        cancel = QPushButton('取消')
+        buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(self.submit)
+        layout.addLayout(buttons)
+
+        def accept():
+            try:
+                self.key = self.profiles.register(self.name.text())
+            except Exception as exc:
+                self.error.setText(str(exc))
+                return
+            self.accept()
+
+        self.submit.clicked.connect(accept)
+        cancel.clicked.connect(self.reject)
+        self.name.setFocus()
+
+    def values(self):
+        return dict(name=self.name.text().strip()) if self.key else None
+
+
+class LockScreen(QDialog):
+    """Entry gate: pick the account to work on, or register a new one.
+
+    Accounts are local to this computer and carry no password: the account name
+    is the only handle, and the data never leaves the machine.
+    """
+
+    def __init__(self, profiles, parent=None):
+        super().__init__(parent)
+        self.profiles = profiles
+        self.key = None
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle(f'{APP_NAME} · 登录')
+        self.setWindowIcon(QIcon(str(Path(__file__).parent/'assets/MoocReminder.ico')))
+        self.setStyleSheet(STYLE)
+        self.setFixedWidth(470)
+        outer = QVBoxLayout(self)
+        card = QFrame(); card.setObjectName('card'); outer.addWidget(card)
+        body = QVBoxLayout(card); body.setContentsMargins(28, 26, 28, 24); body.setSpacing(12)
+        brand = QLabel(APP_NAME); brand.setObjectName('brand'); body.addWidget(brand)
+        subtitle = QLabel('选择账号后进入；没有账号就先注册一个。')
+        subtitle.setObjectName('muted'); subtitle.setWordWrap(True); body.addWidget(subtitle)
+        form = QFormLayout()
+        self.accounts = QComboBox()
+        form.addRow('账号', self.accounts)
+        body.addLayout(form)
+        self.summary = QLabel(''); self.summary.setObjectName('muted'); self.summary.setWordWrap(True)
+        body.addWidget(self.summary)
+        self.error = QLabel(''); self.error.setObjectName('muted'); self.error.setWordWrap(True)
+        body.addWidget(self.error)
+        buttons = QHBoxLayout()
+        self.register_button = QPushButton('注册新账号')
+        self.enter = QPushButton('进入'); self.enter.setObjectName('primary')
+        buttons.addWidget(self.register_button); buttons.addStretch(); buttons.addWidget(self.enter)
+        body.addLayout(buttons)
+        self.register_button.clicked.connect(self.register)
+        self.enter.clicked.connect(self.enter_selected)
+        self.accounts.currentIndexChanged.connect(lambda _: self.show_summary())
+        self.reload()
+
+    def reload(self, select=None):
+        options = self.profiles.account_options()
+        self.accounts.blockSignals(True)
+        self.accounts.clear()
+        for entry in options:
+            self.accounts.addItem(entry['label'], entry['key'])
+        self.accounts.blockSignals(False)
+        self.empty = not options
+        self.register_button.setText('注册账号' if self.empty else '注册新账号')
+        self.register_button.setObjectName('primary' if self.empty else '')
+        self.enter.setEnabled(not self.empty)
+        self.enter.setToolTip('' if not self.empty else '还没有账号，请先注册')
+        self.accounts.setEnabled(not self.empty)
+        if select:
+            index = self.accounts.findData(select)
+            if index >= 0:
+                self.accounts.setCurrentIndex(index)
+        self.show_summary()
+
+    def show_summary(self):
+        if self.empty:
+            self.summary.setText('这台电脑上还没有账号，先注册一个。')
+            return
+        key = self.accounts.currentData()
+        for entry in self.profiles.account_options():
+            if entry['key'] == key:
+                bound = self.profiles.load_store(key).is_bound()
+                self.summary.setText('上次进入的账号' if entry.get('active') else '该账号已绑定慕课与邮箱' if bound
+                                     else '该账号还未绑定慕课与邮箱，进入后按提示完成绑定。')
+                return
+
+    def register(self):
+        dialog = RegisterDialog(self.profiles, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.key:
+            return
+        self.key = dialog.key
+        self.accept()
+
+    def enter_selected(self):
+        key = self.accounts.currentData()
+        if not key:
+            self.error.setText('请先注册一个账号。')
+            return
+        try:
+            self.profiles.login(key)
+        except Exception as exc:
+            self.error.setText(str(exc))
+            return
+        self.key = key
+        self.accept()
+
+    def select_account(self, key):
+        """Used by tests and by callers that already know the account."""
+        self.profiles.login(key)
+        self.key = key
+        self.accept()
+
+
 class Window(QMainWindow):
-    def __init__(self, store):
+    def __init__(self, store, profiles=None):
         super().__init__()
         self.store = store
+        self.profiles = profiles or profiles_module.Profiles(profiles_module.folder_for_store(store.folder))
+        self._email_dialog = None
         self.manager = Manager(store.folder, self)
-        self.controller = Controller(store, context_provider=self.manager.context, profile_dir='webview2-profiles')
+        self.controller = Controller(store, context_provider=self.manager.context, profile_dir='web-profiles')
         self.manager.on_error = lambda message: self.controller.events.put(('error', message))
         self.setWindowTitle(f'{APP_NAME} · 作业提醒 {VERSION}')
         self.setWindowIcon(QIcon(str(Path(__file__).parent/'assets/MoocReminder.ico')))
@@ -84,17 +351,37 @@ class Window(QMainWindow):
             button = QPushButton(text); button.setObjectName('nav'); button.clicked.connect(action); sidebar.addWidget(button)
         sidebar.addStretch()
         note = QLabel('把重要的日期，\n留在视线里。'); note.setStyleSheet('font-size:13px;line-height:24px;color:#9ca7b9'); sidebar.addWidget(note)
-        sidebar.addSpacing(21); self.connection = QLabel('●  尚未连接慕课'); self.connection.setObjectName('muted'); sidebar.addWidget(self.connection)
+        sidebar.addSpacing(21)
+        self.account_label = QLabel('当前账号'); self.account_label.setObjectName('muted'); sidebar.addWidget(self.account_label)
+        self.account_summary = QLabel(''); self.account_summary.setWordWrap(True); sidebar.addWidget(self.account_summary)
+        self.account_combo = QComboBox(); self.account_combo.setToolTip('切换账号；每个账号的邮箱与作业记录各自独立')
+        self.account_combo.activated.connect(self.account_selected); sidebar.addWidget(self.account_combo)
+        sidebar.addSpacing(8)
+        self.connection = QLabel('●  尚未连接慕课'); self.connection.setObjectName('muted'); sidebar.addWidget(self.connection)
         layout.addWidget(side)
         main = QWidget(); body = QVBoxLayout(main); body.setContentsMargins(32, 23, 32, 19); body.setSpacing(18)
         top = QHBoxLayout(); crumb = QLabel('学习空间  /  总览'); crumb.setObjectName('muted'); top.addWidget(crumb); top.addStretch()
         date = QLabel(datetime.now().strftime('%m月%d日')); date.setObjectName('muted'); top.addWidget(date)
+        self.email_button = QPushButton('邮件提醒'); self.email_button.setFixedWidth(96)
+        self.email_button.setToolTip('设置接收提醒的邮箱，无需先登录慕课')
+        self.email_button.clicked.connect(self.open_email_settings); top.addWidget(self.email_button)
         self.pause = QPushButton('暂停'); self.pause.setFixedWidth(72); self.pause.clicked.connect(self.toggle_pause); top.addWidget(self.pause); body.addLayout(top)
         heading = QHBoxLayout(); title_block = QVBoxLayout(); eyebrow = QLabel('A LITTLE MORE ORGANIZED'); eyebrow.setObjectName('muted'); title_block.addWidget(eyebrow)
         title = QLabel('作业概览'); title.setObjectName('title'); title_block.addWidget(title); title_block.addWidget(QLabel('截止时间看清楚，学习节奏更从容。')); heading.addLayout(title_block); heading.addStretch()
         self.login = QPushButton('连接慕课'); self.login.clicked.connect(lambda: self.request('login')); heading.addWidget(self.login)
         self.scan = QPushButton('检查作业'); self.scan.setObjectName('primary'); self.scan.clicked.connect(lambda: self.request('scan')); heading.addWidget(self.scan); body.addLayout(heading)
         self.status = QLabel('在内置窗口中登录慕课，再回来检查作业。'); self.status.setWordWrap(True); self.status.setStyleSheet('background:#edf3ff;border:1px solid #e0e9fb;border-radius:8px;padding:12px;color:#849bc0'); body.addWidget(self.status)
+        # Shown until this account has bound both its MOOC page and its email.
+        self.binding = QFrame(); self.binding.setObjectName('card')
+        binding_row = QHBoxLayout(self.binding); binding_row.setContentsMargins(20, 16, 20, 16)
+        binding_copy = QVBoxLayout()
+        self.binding_title = QLabel('还差两步就可以开始检查作业'); self.binding_title.setObjectName('sectionTitle')
+        self.binding_detail = QLabel(); self.binding_detail.setObjectName('muted'); self.binding_detail.setWordWrap(True)
+        binding_copy.addWidget(self.binding_title); binding_copy.addWidget(self.binding_detail)
+        binding_row.addLayout(binding_copy); binding_row.addStretch()
+        self.binding_button = QPushButton('绑定慕课与邮箱'); self.binding_button.setObjectName('primary')
+        self.binding_button.clicked.connect(self.open_binding); binding_row.addWidget(self.binding_button)
+        body.addWidget(self.binding)
         metrics = QHBoxLayout(); metrics.setSpacing(17); self.metrics = {}
         for key, name, desc in [('pending', '待完成 / 待核对', '所有尚未截止的任务'), ('soon', '3 天内截止', '优先安排时间完成'), ('courses', '已读取课程', 'MOOC · 校内 SPOC')]:
             card = QFrame(); card.setObjectName('card'); card_layout = QVBoxLayout(card); card_layout.setContentsMargins(21, 15, 21, 16); card_layout.addWidget(QLabel(name))
@@ -138,8 +425,17 @@ class Window(QMainWindow):
 
     def refresh(self, *_):
         data = self.controller.snapshot()
+        self.refresh_accounts()
+        bound = self.binding_state()
+        self.binding.setVisible(not all(bound.values()))
+        if not all(bound.values()):
+            missing = [name for name, ok in (('慕课账号', bound['mooc']), ('接收提醒的邮箱', bound['email'])) if not ok]
+            self.binding_detail.setText('尚未绑定：' + '、'.join(missing) + '。绑定后即可检查作业并收到提醒。')
+        self.scan.setEnabled(not data['busy'] and all(bound.values()))
+        self.login.setEnabled(not data['busy'] and bound['mooc'])
+        self.scan.setToolTip('' if all(bound.values()) else '请先绑定慕课账号与邮箱')
         self.status.setText(data['phase'] + (f" · {data['elapsed']} 秒" if data['busy'] else ''))
-        self.login.setEnabled(not data['busy']); self.scan.setEnabled(not data['busy']); self.cancel.setVisible(data['busy'])
+        self.cancel.setVisible(data['busy'])
         self.connection.setText('●  已连接慕课' if data['connected'] else '●  等待完成登录' if data['job']=='waiting_login' else '●  尚未连接慕课')
         for key, label in self.metrics.items(): label.setText(str(data['summary'][key]))
         self.interval.setText('自动检查已暂停' if data['paused'] else f"每 {data['settings']['interval_minutes']} 分钟检查")
@@ -184,18 +480,206 @@ class Window(QMainWindow):
     def show_courses(self):
         QMessageBox.information(self,'我的课程','\n\n'.join(course['name'] for course in self.store.data['courses']) or '首次检查后，课程会自动显示。')
 
+    def open_binding(self):
+        """Bind the MOOC course page and the reminder email for this account."""
+        state = self.binding_state()
+        dialog = QDialog(self)
+        dialog.setWindowTitle('绑定慕课与邮箱')
+        dialog.resize(600, 620)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel('每个账号各自绑定：慕课主页决定读取谁的作业，邮箱决定提醒发到哪里。')
+        intro.setWordWrap(True); intro.setObjectName('muted'); layout.addWidget(intro)
+        settings = self.store.data['settings']
+        mooc_title = QLabel('一、慕课账号'); mooc_title.setObjectName('sectionTitle'); layout.addWidget(mooc_title)
+        mooc_form = QFormLayout()
+        home = QLineEdit('' if account_id(settings['home_url']) in ('', '0') else settings['home_url'])
+        home.setPlaceholderText('https://www.icourse163.org/home.htm?userId=你的数字账号#/home/course')
+        mooc_form.addRow('课程主页', home)
+        layout.addLayout(mooc_form)
+        mooc_hint = QLabel('登录慕课后打开个人主页，地址栏里的 userId 就是你的账号。')
+        mooc_hint.setObjectName('muted'); mooc_hint.setWordWrap(True); layout.addWidget(mooc_hint)
+        email_title = QLabel('二、接收提醒的邮箱'); email_title.setObjectName('sectionTitle'); layout.addWidget(email_title)
+        form = EmailSettingsForm(settings.get('email'), dialog)
+        form.enabled.setChecked(True)
+        layout.addWidget(form)
+        self._email_dialog = (dialog, form)
+        form.test_requested.connect(lambda patch: self.send_test_email(dialog, form, patch))
+        layout.addStretch()
+        buttons = QHBoxLayout()
+        save = QPushButton('保存绑定'); save.setObjectName('primary')
+        cancel = QPushButton('稍后再说')
+        buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        def apply():
+            try:
+                self.controller.settings(dict(home_url=home.text().strip(), email=form.values()))
+                self.profiles.save_shared(self.store.data['settings'])
+                self.last_signature = None
+            except Exception as exc:
+                QMessageBox.warning(dialog, '绑定未保存', str(exc))
+                return
+            dialog.accept()
+            self.refresh()
+            if self.store.is_bound():
+                self.status.setText('绑定完成，正在检查作业…')
+                self.request('scan')
+            else:
+                missing = self.binding_state()
+                self.status.setText('还差' + ('慕课主页' if not missing['mooc'] else '邮箱') + '，补齐后即可检查作业。')
+
+        save.clicked.connect(apply)
+        cancel.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def binding_state(self):
+        return core_binding_state(self.store.data['settings'])
+
+    def open_email_settings(self):
+        """Reachable before signing in to MOOC, so the email can be set up first."""
+        patch = self.edit_email_dialog()
+        if patch is None:
+            return
+        try:
+            self.controller.settings(dict(email=patch))
+            self.refresh()
+            self.status.setText('邮件提醒设置已保存。')
+        except Exception as exc:
+            QMessageBox.warning(self, '邮件设置未保存', str(exc))
+
+    def edit_email_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('邮件提醒设置')
+        dialog.resize(560, 520)
+        layout = QVBoxLayout(dialog)
+        settings = self.store.data['settings']
+        form = EmailSettingsForm(settings.get('email'), dialog)
+        layout.addWidget(form)
+        self._email_dialog = (dialog, form)
+        form.test_requested.connect(lambda patch: self.send_test_email(dialog, form, patch))
+        layout.addStretch()
+        buttons = QHBoxLayout()
+        save = QPushButton('保存'); save.setObjectName('primary')
+        cancel = QPushButton('取消')
+        buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(save)
+        layout.addLayout(buttons)
+        result = {}
+
+        def accept():
+            result['patch'] = form.values()
+            dialog.accept()
+
+        save.clicked.connect(accept)
+        cancel.clicked.connect(dialog.reject)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return result.get('patch')
+
+    def current_account_key(self):
+        """Which profile the window is showing right now."""
+        home = self.store.data['settings'].get('home_url', '')
+        for entry in self.profiles.list_profiles():
+            if entry['home_url'] == home:
+                return entry['key']
+        return ''
+
+    def switch_account(self, key):
+        if key == self.current_account_key():
+            return
+        try:
+            self.profiles.set_active(key)
+            store = self.profiles.load_store()
+        except Exception as exc:
+            QMessageBox.warning(self, '切换账号失败', str(exc))
+            self.refresh()
+            return
+        self.store = store
+        self.last_signature = None
+        resuming = self.controller.replace_store(store)
+        self.account_combo.blockSignals(True)
+        self.account_combo.setCurrentIndex(max(0, self.account_combo.findData(key)))
+        self.account_combo.blockSignals(False)
+        name = store.data['settings'].get('name') or '另一个账号'
+        self.status.setText(('正在恢复' + name + '上次的结果…') if resuming else
+                            (name + '尚未连接慕课，请点击“连接慕课”。'))
+        self.refresh()
+
+    def add_account(self):
+        dialog = RegisterDialog(self.profiles, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.key:
+            self.refresh()
+            return
+        self.store = self.profiles.load_store()
+        self.last_signature = None
+        self.controller.replace_store(self.store)
+        self.refresh_accounts()
+        self.refresh()
+        self.status.setText('已添加账号，请点击“绑定慕课与邮箱”完成绑定。')
+
+    def refresh_accounts(self):
+        self.account_combo.blockSignals(True)
+        self.account_combo.clear()
+        for entry in self.profiles.list_profiles():
+            self.account_combo.addItem(entry['label'], entry['key'])
+        self.account_combo.addItem('添加账号…', '__add__')
+        current = self.current_account_key()
+        index = self.account_combo.findData(current)
+        self.account_combo.setCurrentIndex(max(0, index))
+        self.account_combo.blockSignals(False)
+        label = current
+        for entry in self.profiles.list_profiles():
+            if entry['key'] == current:
+                label = entry['label']
+        self.account_label.setText('当前账号')
+        self.account_summary.setText(label)
+
+    def account_selected(self, index):
+        key = self.account_combo.itemData(index)
+        if key == '__add__':
+            self.add_account()
+        elif key:
+            self.switch_account(key)
+
     def settings(self):
-        dialog=QDialog(self);dialog.setWindowTitle('提醒设置');dialog.resize(700,480);layout=QVBoxLayout(dialog);form=QFormLayout();settings=self.store.data['settings']
+        dialog=QDialog(self);dialog.setWindowTitle('提醒设置');dialog.resize(700,760);layout=QVBoxLayout(dialog);form=QFormLayout();settings=self.store.data['settings']
         home=QLineEdit(settings['home_url']);hours=QLineEdit(','.join(str(v) for v in settings['reminder_hours']));interval=QSpinBox();interval.setRange(5,1440);interval.setValue(settings['interval_minutes'])
         manual=QPlainTextEdit('\n'.join(settings['manual_urls']));quizzes=QCheckBox('同时提醒测验');quizzes.setChecked(settings['include_quizzes']);finished=QCheckBox('检查已结束学期');finished.setChecked(settings['include_finished'])
         form.addRow('课程主页',home);form.addRow('提前提醒（小时）',hours);form.addRow('检查间隔（分钟）',interval);form.addRow('补充作业链接',manual);form.addRow(quizzes);form.addRow(finished);layout.addLayout(form)
+        divider=QLabel('邮件提醒');divider.setObjectName('sectionTitle');layout.addWidget(divider)
+        mail=EmailSettingsForm(settings.get('email'),dialog);layout.addWidget(mail)
+        self._email_dialog = (dialog, mail)
+        mail.test_requested.connect(lambda patch: self.send_test_email(dialog,mail,patch))
+        layout.addStretch()
         save=QPushButton('保存设置');save.setObjectName('primary');layout.addWidget(save)
         def apply():
             try:
-                self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked()))
+                self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),email=mail.values()))
+                self.profiles.save_shared(self.store.data['settings'])
                 dialog.accept();self.refresh()
             except Exception as exc: QMessageBox.warning(dialog,'设置未保存',str(exc))
         save.clicked.connect(apply);dialog.exec()
+
+    def mailer_idle(self):
+        return not self.controller.mailer.inflight
+
+    def send_test_email(self, dialog, form, patch):
+        """Send one message and report the outcome inside the settings dialog."""
+        try:
+            merged = {**self.controller.email_config(), **patch}
+            self.controller.send_test_email(merged)
+        except Exception as exc:
+            form.hint.setText('测试邮件未发送：'+str(exc))
+            return False
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if self.mailer_idle():
+                status = self.controller.snapshot()['email_status']
+                form.hint.setText(status or '测试邮件已发送，请查收。')
+                return True
+            time.sleep(0.05)
+        form.hint.setText('测试邮件仍在发送中，稍后可在“连接详情”查看结果。')
+        return False
 
     def closeEvent(self,event):
         self.controller.stop()
@@ -206,7 +690,14 @@ class Window(QMainWindow):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--data-dir');parser.add_argument('--smoke-report');parser.add_argument('--preview');parser.add_argument('--startup-report');args=parser.parse_args()
     app=QApplication(sys.argv);app.setQuitOnLastWindowClosed(False);app.setApplicationName(APP_NAME)
-    window=Window(Store(args.data_dir));window.show()
+    # Each account keeps its own profile; the program reopens the last one used.
+    account = profiles_module.Profiles(args.data_dir)
+    if not args.smoke_report:
+        # Signing in is the first thing the program asks for.
+        gate = LockScreen(account)
+        if gate.exec() != QDialog.DialogCode.Accepted:
+            return 0
+    window=Window(account.load_store(), profiles=account);window.show()
     if args.startup_report:
         def startup_ready():
             target=Path(args.startup_report);temporary=target.with_suffix('.tmp')
