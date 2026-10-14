@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -5,21 +6,114 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import emailer
 import secrets_store
+from browser import parse_cookie_header
 from core import Assignment, BEIJING, DEFAULT_SETTINGS, due_digests
 from emailer import (EmailError, EmailSettings, Mail, Mailer, SmtpNotifier, compose_alert, compose_digest,
                      password_saved, suggest_server, validate, valid_address, valid_digest_times, get_notifier)
 from storage import Store, normalize_email_settings
 
 
-def make_item(uid='u1', name='第三章作业', kind='作业', course='高等数学', hours=20, url='https://www.icourse163.org/learn/X-1?tid=1#/learn/testlist'):
+def make_item(uid='u1', name='第三章作业', kind='作业', course='高等数学', hours=20,
+              url='https://www.icourse163.org/learn/X-1?tid=1#/learn/testlist'):
     return Assignment(uid=uid, course=course, course_url=url, name=name, kind=kind,
-                      deadline=BEIJING.localize(datetime(2026, 10, 15, 23, 30)) if hasattr(BEIJING, 'localize')
-                      else datetime(2026, 10, 15, 23, 30, tzinfo=BEIJING),
+                      deadline=datetime(2026, 10, 15, 23, 30, tzinfo=BEIJING),
                       deadline_text='截止时间：2026/10/15 23:30', status='pending', checked_at='')
 
 
 NOW = datetime(2026, 10, 14, 8, 0, tzinfo=BEIJING)
+
+
+class ShippedSenderTests(unittest.TestCase):
+    """An ordinary user gives only their own address; the sender is shipped."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.folder = Path(self.temp.name)
+        (self.folder/'email_sender.json').write_text(json.dumps({
+            'sender': 'reminder@example.com', 'server': 'smtp.example.com', 'port': 465,
+            'security': 'ssl', 'password': 'admin-secret'}), encoding='utf-8')
+        self.user = dict(enabled=True, recipient='student@qq.com', sender='', server='',
+                         port=465, security='ssl', password='', digest_times=[])
+
+    def tearDown(self):
+        emailer.load_sender(self.folder, refresh=True)
+        self.temp.cleanup()
+
+    def test_blank_fields_fall_back_to_the_shipped_sender(self):
+        merged = emailer.resolve(self.user, self.folder)
+        self.assertEqual(merged['sender'], 'reminder@example.com')
+        self.assertEqual(merged['server'], 'smtp.example.com')
+        self.assertEqual(merged['password'], 'admin-secret')
+
+    def test_only_the_recipient_is_required_to_validate(self):
+        settings = emailer.validate(self.user, emailer.resolve_password(self.user, self.folder), self.folder)
+        self.assertEqual(settings.recipient, 'student@qq.com')
+        self.assertEqual(settings.sender, 'reminder@example.com')
+        self.assertEqual(settings.password, 'admin-secret')
+
+    def test_a_user_value_wins_over_the_shipped_one(self):
+        custom = dict(self.user, sender='me@qq.com', server='smtp.qq.com', password='mine')
+        merged = emailer.resolve(custom, self.folder)
+        self.assertEqual(merged['sender'], 'me@qq.com')
+        self.assertEqual(merged['server'], 'smtp.qq.com')
+        self.assertEqual(merged['password'], 'mine')
+
+    def test_without_a_shipped_sender_the_user_is_told_what_is_missing(self):
+        empty = Path(tempfile.mkdtemp())
+        try:
+            with self.assertRaises(EmailError) as error:
+                emailer.validate(self.user, emailer.resolve_password(self.user, empty), empty)
+            # The blank server is reported first; either message is actionable.
+            self.assertTrue('邮件服务器' in str(error.exception) or '授权码' in str(error.exception))
+            # And with a server but no credential, the credential is the blocker.
+            with self.assertRaises(EmailError) as second:
+                emailer.validate(dict(self.user, server='smtp.qq.com'),
+                                 emailer.resolve_password(self.user, empty), empty)
+            self.assertIn('授权码', str(second.exception))
+        finally:
+            for path in sorted(empty.rglob('*'), reverse=True):
+                path.unlink() if path.is_file() else path.rmdir()
+            empty.rmdir()
+
+    def test_the_repository_file_ships_empty(self):
+        # The tracked copy must never carry a real credential.
+        shipped = emailer.load_sender(Path(__file__).resolve().parents[1], refresh=True)
+        self.assertEqual(shipped, {}, '仓库里的 email_sender.json 必须保持为空模板')
+
+    def test_a_malformed_sender_file_is_ignored(self):
+        (self.folder/'email_sender.json').write_text('{ not json', encoding='utf-8')
+        self.assertEqual(emailer.load_sender(self.folder, refresh=True), {})
+
+
+class CookieLoginTests(unittest.TestCase):
+    """The cookie fallback must parse real pastes and ignore everything else."""
+
+    def test_a_cookie_header_is_parsed(self):
+        pasted = 'NTESSTUDYSI=abc123; STUDY_SESS=def456; EDUWEBDEVICE=xyz; _ga=GA1.2.9'
+        parsed = parse_cookie_header(pasted)
+        self.assertEqual([name for name, _, _ in parsed], ['NTESSTUDYSI', 'STUDY_SESS', 'EDUWEBDEVICE'])
+        self.assertTrue(all(domain == '.icourse163.org' for _, _, domain in parsed))
+
+    def test_unrelated_cookies_are_dropped(self):
+        self.assertEqual(parse_cookie_header('_ga=1; sessionid=2; foo=bar'), [])
+
+    def test_multiline_and_quoted_values_are_handled(self):
+        parsed = parse_cookie_header('NTESSTUDYSI=abc;\nSTUDY_INFO="quoted-value"\n')
+        self.assertEqual(parsed, [('NTESSTUDYSI', 'abc', '.icourse163.org'),
+                                  ('STUDY_INFO', 'quoted-value', '.icourse163.org')])
+
+    def test_junk_input_yields_nothing_instead_of_raising(self):
+        for junk in ('', '   ', 'not-a-cookie', ';;;', '=;;='):
+            self.assertEqual(parse_cookie_header(junk), [])
+
+    def test_login_with_cookies_refuses_an_empty_paste(self):
+        from browser import MoocBrowser
+        reader = MoocBrowser(tempfile.mkdtemp())
+        with self.assertRaises(ValueError) as error:
+            reader.login_with_cookies('https://www.icourse163.org/home.htm?userId=1#/home/course', '  ')
+        self.assertIn('Cookie', str(error.exception))
 
 
 class AddressAndTimeTests(unittest.TestCase):

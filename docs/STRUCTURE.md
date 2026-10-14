@@ -32,6 +32,7 @@ MoocReminder/
 ├─ requirements-runtime.txt             运行期依赖，随包版本校验用
 ├─ LICENSE                              本项目 MIT 许可证
 ├─ THIRD-PARTY-NOTICES.md               随包分发的第三方组件与许可证声明（发布包必带）
+├─ email_sender.example.json            发件邮箱配置模板（仓库只留空模板，真实配置不提交）
 ├─ licenses/                            Qt 的 LGPL-3.0 / GPL-3.0 正文（发布包必带，见其 README）
 ├─ assets/                              图标
 ├─ docs/                                验证记录与本文件
@@ -99,6 +100,10 @@ Qt 的库跨 wheel 分布，`QtWebEngineCore` 依赖只随 `PySide6-Addons` 分�
 `qt_reader.py` 的 QtWebEngine 适配器。没有适配器时它会明确报错，而不是静默失败。
 
 邮件提醒是旁路通道：`portal.py` 复用 `core.due_reminders` / `core.due_digests` 判断该发什么，把任务交给 `emailer.Mailer` 的队列；`emailer` 只依赖标准库与 `secrets_store`，凭据经 DPAPI 加密后随其它设置存在本机数据目录，缺失 DPAPI 时会写入明确标注的回退格式。
+
+发件与收件是分开的：**发件账号由发布者配置**在 `email_sender.json`（见 [EMAIL_SENDER.md](EMAIL_SENDER.md)），
+用户只填自己的收件邮箱。`emailer.resolve()` 把用户留空的项用预置值补齐，用户填了就以用户的为准；
+`resolve_password()` 同理决定用哪一份凭据。`package_source.py` 会拒绝打出未配置发件账号的包。
 
 ## 本机数据布局
 

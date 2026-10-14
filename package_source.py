@@ -55,6 +55,16 @@ def package(with_runtime=False):
         for required in LICENSE_TEXTS + UNTRACKED_RELEASE_INPUTS:
             if not (ROOT/required).is_file():
                 raise RuntimeError('Missing release input: ' + required)
+        # The publisher's sender configuration is untracked but must ship, or
+        # users cannot send anything and would have to configure it themselves.
+        sender_file = ROOT/'email_sender.json'
+        if not sender_file.is_file():
+            raise RuntimeError('缺少 email_sender.json：请先按 docs/EMAIL_SENDER.md 配置发件邮箱，'
+                               '否则用户无法收到提醒。')
+        configured = json.loads(sender_file.read_text(encoding='utf-8'))
+        if not str(configured.get('sender', '') or '').strip() or not str(configured.get('password', '') or '').strip():
+            raise RuntimeError('email_sender.json 里的发件邮箱或授权码为空，用户将无法发信。')
+        entries['email_sender.json'] = 'email_sender.json'
         for name in names:
             if name.startswith(('.build/', '.runtime-bundle/')):
                 raise RuntimeError('Build output must not be a tracked release entry: ' + name)

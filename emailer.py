@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate
+import json
+from pathlib import Path
 import re
 import smtplib
 import ssl
@@ -32,6 +34,59 @@ PRESETS = {
 }
 
 SECTION_LABELS = {'作业': '作业', '测验': '测验'}
+
+# Shipped sender settings, filled in by the publisher. Ordinary users only give
+# their own address, so the account that actually sends has to be configured
+# somewhere; this file is the single place for it.
+SENDER_FILE = 'email_sender.json'
+SENDER_KEYS = ('sender', 'server', 'port', 'security', 'password')
+
+
+_sender_cache = {}
+
+
+def load_sender(folder=None, refresh=False):
+    """Read the publisher's sender settings; {} when not configured.
+
+    Cached per folder because this is consulted on every send and never changes
+    while the program runs; `refresh` forces a re-read (used by tests).
+    """
+    path = (Path(folder) if folder else Path(__file__).resolve().parent)/SENDER_FILE
+    key = str(path)
+    if not refresh and key in _sender_cache:
+        return _sender_cache[key]
+    loaded = {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            for name in SENDER_KEYS:
+                value = data.get(name)
+                if name == 'port':
+                    if isinstance(value, int) and 1 <= value <= 65535:
+                        loaded[name] = value
+                elif isinstance(value, str) and value.strip():
+                    # Only a filled-in value counts; the shipped file keeps the
+                    # keys empty until a publisher configures them.
+                    loaded[name] = value.strip()
+    except (OSError, ValueError):
+        loaded = {}
+    _sender_cache[key] = loaded
+    return loaded
+
+
+def resolve(config, folder=None):
+    """Merge a user's settings with the shipped sender defaults.
+
+    A value the user typed wins; anything blank falls back to the publisher's
+    configuration, so a user only has to give their own address. Blank has to be
+    tested by emptiness, not by key presence: the interface always sends every
+    key, with empty strings for the ones the user left alone.
+    """
+    merged = dict(config or {})
+    for name, value in load_sender(folder).items():
+        if not str(merged.get(name, '') or '').strip():
+            merged[name] = value
+    return merged
 
 
 class EmailError(RuntimeError):
@@ -104,9 +159,18 @@ def valid_digest_times(times):
     return sorted(normalised)
 
 
-def validate(config, password=None):
-    """Raise EmailError with a user-facing reason, or return an EmailSettings."""
-    settings = EmailSettings.from_settings({'email': config}, password if password is not None else (config or {}).get('password', ''))
+def validate(config, password=None, folder=None):
+    """Raise EmailError with a user-facing reason, or return an EmailSettings.
+
+    The shipped sender settings are applied first, so a user who only filled in
+    their own address validates as long as the publisher configured the rest.
+    """
+    resolved = resolve(config, folder)
+    if password is not None:
+        resolved['password'] = password
+    # from_settings reads the password from its own argument, so it has to be
+    # handed over explicitly; passing only the dict would drop it.
+    settings = EmailSettings.from_settings({'email': resolved}, str(resolved.get('password', '') or ''))
     if not settings.recipient.strip():
         raise EmailError('请填写接收提醒的邮箱地址。')
     if not valid_address(settings.recipient):
@@ -264,6 +328,18 @@ def password_saved(token):
     return bool(token) and bool(secrets_store.decrypt(token))
 
 
+def resolve_password(config, folder=None):
+    """The credential to authenticate with.
+
+    A password the user stored wins; otherwise the publisher's shipped sender
+    supplies one, which is what lets a user configure only their own address.
+    """
+    stored = secrets_store.decrypt((config or {}).get('password', ''))
+    if stored:
+        return stored
+    return str(load_sender(folder).get('password', '') or '')
+
+
 def get_notifier(name='smtp'):
     """Resolve a channel by name so new transports stay additive."""
     notifiers = {SmtpNotifier.name: SmtpNotifier}
@@ -279,11 +355,12 @@ class Mailer:
     tests can substitute a fake channel and the password stays out of the queue.
     """
 
-    def __init__(self, log=None, resolve=None, on_result=None):
+    def __init__(self, log=None, resolve=None, on_result=None, folder=None):
         self.events = queue.Queue()
         self.log = log or (lambda message: None)
         self.on_result = on_result or (lambda key, ok, detail: None)
-        self.resolve = resolve or (lambda config: (validate(config, secrets_store.decrypt(config.get('password', ''))),
+        self.folder = folder
+        self.resolve = resolve or (lambda config: (validate(config, resolve_password(config, folder), folder),
                                                    get_notifier()))
         self.inflight = set()
         self.thread = None

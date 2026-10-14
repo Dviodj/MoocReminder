@@ -64,6 +64,11 @@ class ReleasePackagingTests(unittest.TestCase):
         (self.root/'licenses/LGPL-3.0.txt').write_text('LGPL fixture\n', encoding='utf-8')
         (self.root/'licenses/GPL-3.0.txt').write_text('GPL fixture\n', encoding='utf-8')
         (self.root/'THIRD-PARTY-NOTICES.md').write_text('notices fixture\n', encoding='utf-8')
+        # The publisher's sender configuration ships untracked; packaging
+        # refuses to build without it.
+        (self.root/'email_sender.json').write_text(json.dumps({
+            'sender': 'reminder@example.com', 'server': 'smtp.example.com', 'port': 465,
+            'security': 'ssl', 'password': 'fixture-secret'}), encoding='utf-8')
         self.bundle = self.root/'.build/runtime-bundle'
         for name, payload in [('bundle.json', json.dumps({'platform': 'win_amd64', 'python_tags': ['cp313']})),
                               ('python/python.exe', 'binary'),
@@ -128,6 +133,20 @@ class ReleasePackagingTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as error:
             self.build(with_runtime=True)
         self.assertIn('license', str(error.exception).lower())
+
+    def test_the_sender_configuration_ships_with_the_package(self):
+        archive_path = self.build(with_runtime=True)
+        with zipfile.ZipFile(archive_path) as archive:
+            names = set(archive.namelist())
+        self.assertIn('MoocReminder-v9.9.9/email_sender.json', names)
+
+    def test_an_unconfigured_sender_blocks_the_release(self):
+        # Shipping without it would leave every user unable to receive reminders.
+        (self.root/'email_sender.json').write_text(json.dumps({
+            'sender': '', 'server': '', 'port': 465, 'security': 'ssl', 'password': ''}), encoding='utf-8')
+        with self.assertRaises(RuntimeError) as error:
+            self.build(with_runtime=True)
+        self.assertIn('email_sender.json', str(error.exception))
 
 
 if __name__ == '__main__':

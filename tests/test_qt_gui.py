@@ -93,21 +93,33 @@ class EmailSettingsFormTests(unittest.TestCase):
         self.assertFalse(form.saved_password)
         self.assertIn('重新填写', form.hint.text())
 
-    def test_typing_a_recipient_suggests_the_provider_preset(self):
+    def test_a_recipient_alone_is_enough_and_does_not_touch_the_server(self):
+        """Ordinary users only give their own address; the sender is shipped."""
         form = self.make(recipient='', server='', port=465)
         form.recipient.setText('someone@163.com')
+        self.assertEqual(form.server.text(), '')
+        self.assertIn('预置的发件邮箱', form.hint.text())
+        self.assertFalse(form.advanced.isVisibleTo(form))
+
+    def test_advanced_mode_suggests_a_server_for_the_sender(self):
+        form = self.make(recipient='', server='', port=465)
+        form.advanced_toggle.setChecked(True)
+        form.sender.setText('someone@163.com')
         self.assertEqual(form.server.text(), 'smtp.163.com')
         self.assertEqual(form.port.value(), 465)
+        self.assertTrue(form.values()['advanced'])
 
     def test_a_manually_typed_server_is_not_overwritten(self):
         form = self.make(recipient='', server='mail.mycompany.com', port=2525)
-        form.recipient.setText('someone@163.com')
+        form.advanced_toggle.setChecked(True)
+        form.sender.setText('someone@163.com')
         self.assertEqual(form.server.text(), 'mail.mycompany.com')
         self.assertEqual(form.port.value(), 2525)
 
     def test_unknown_provider_is_reported_and_custom_server_kept(self):
         form = self.make(recipient='', server='', port=465)
-        form.recipient.setText('someone@company.example')
+        form.advanced_toggle.setChecked(True)
+        form.sender.setText('someone@company.example')
         self.assertIn('手动填写', form.hint.text())
         self.assertEqual(form.server.text(), '')
 

@@ -56,9 +56,11 @@ def normalize_email_settings(patch, current=None):
     if times is None:
         raise ValueError('发信时刻请填写 HH:MM，例如 08:00 或 08:00,20:00。')
     merged['digest_times'] = times
+    # Remember whether the user chose to configure the sender themselves.
+    advanced = incoming.get('advanced', current.get('advanced', False))
     return dict(enabled=settings.enabled, recipient=settings.recipient.strip(), sender=settings.sender.strip(),
                 server=settings.server.strip(), port=settings.port, security=settings.security,
-                password=merged['password'], digest_times=times)
+                password=merged['password'], digest_times=times, advanced=bool(advanced))
 
 class Store:
     def __init__(self, folder=None, settings_base=None):

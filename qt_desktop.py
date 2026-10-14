@@ -69,10 +69,8 @@ class EmailSettingsForm(QWidget):
         form = QFormLayout()
         self.recipient = QLineEdit(str(email.get('recipient', '')))
         self.recipient.setPlaceholderText('例如 you@qq.com')
-        self.sender = QLineEdit(str(email.get('sender', '')))
-        self.sender.setPlaceholderText('默认使用收件邮箱本身')
         self.server = QLineEdit(str(email.get('server', '')))
-        self.server.setPlaceholderText('填入收件邮箱后自动识别，例如 smtp.qq.com')
+        self.server.setPlaceholderText('留空则使用程序预置的邮件服务器')
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(int(email.get('port', emailer.DEFAULT_PORT)))
@@ -81,19 +79,32 @@ class EmailSettingsForm(QWidget):
         self.security.addItem('STARTTLS（常用 587）', 'starttls')
         index = self.security.findData(str(email.get('security', 'ssl')))
         self.security.setCurrentIndex(max(0, index))
+        self.sender = QLineEdit(str(email.get('sender', '')))
+        self.sender.setPlaceholderText('留空则使用程序预置的发件邮箱')
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText('已保存，留空则不修改' if self.saved_password else '邮箱授权码，不是登录密码')
+        self.password.setPlaceholderText('已保存，留空则不修改' if self.saved_password else '留空则使用程序预置的授权码')
         self.digest = QLineEdit(','.join(email.get('digest_times', []) or []))
         self.digest.setPlaceholderText('例如 08:00,20:00，留空则只按截止时间提醒')
         form.addRow('接收提醒的邮箱', self.recipient)
-        form.addRow('发件邮箱', self.sender)
-        form.addRow('邮件服务器', self.server)
-        form.addRow('端口', self.port)
-        form.addRow('加密方式', self.security)
-        form.addRow('授权码', self.password)
         form.addRow('每日发信时刻', self.digest)
         layout.addLayout(form)
+        # Everything below is optional: the program ships a sender, so an
+        # ordinary user only needs the address above.
+        self.advanced_toggle = QCheckBox('高级选项（自定义发件邮箱与服务器）')
+        self.advanced_toggle.setChecked(bool(email.get('advanced')))
+        layout.addWidget(self.advanced_toggle)
+        self.advanced = QWidget()
+        advanced_form = QFormLayout(self.advanced)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.addRow('发件邮箱', self.sender)
+        advanced_form.addRow('邮件服务器', self.server)
+        advanced_form.addRow('端口', self.port)
+        advanced_form.addRow('加密方式', self.security)
+        advanced_form.addRow('授权码', self.password)
+        layout.addWidget(self.advanced)
+        self.advanced.setVisible(self.advanced_toggle.isChecked())
+        self.advanced_toggle.toggled.connect(self.advanced.setVisible)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         self.hint.setObjectName('muted')
@@ -106,14 +117,16 @@ class EmailSettingsForm(QWidget):
         state.addWidget(self.clear_password)
         state.addStretch()
         layout.addLayout(state)
-        note = QLabel('授权码加密后仅保存在本机；程序需要在运行才能发信，关机期间不会发送。')
+        note = QLabel('提醒由程序预置的发件邮箱统一发出；填好上面的邮箱即可，无需了解邮件服务器。')
         note.setObjectName('muted')
         note.setWordWrap(True)
         layout.addWidget(note)
         self.recipient.textChanged.connect(self.autofill)
+        self.sender.textChanged.connect(self.autofill)
         self.password.textEdited.connect(self.mark_password)
         self.clear_password.clicked.connect(self.forget)
         self.test_button.clicked.connect(self.request_test)
+        self.advanced_toggle.toggled.connect(lambda _: self.autofill(self.recipient.text()))
         self.autofill(self.recipient.text())
 
     def mark_password(self, *_):
@@ -128,11 +141,19 @@ class EmailSettingsForm(QWidget):
         self.hint.setText('保存后本机不再保留授权码，需要重新填写才能发信。')
 
     def autofill(self, text):
-        """Suggest a provider preset until the user edits the server manually."""
+        """Offer a provider preset for the sender the user is configuring.
+
+        Only in advanced mode: the server has to match whoever actually sends,
+        which by default is the shipped sender, not the address being typed in
+        as the recipient.
+        """
         self.test_button.setEnabled(bool(str(text).strip()))
-        preset = emailer.suggest_server(text)
+        if not self.advanced_toggle.isChecked():
+            self.hint.setText('提醒会从程序预置的发件邮箱发出，你只需填写自己的邮箱。' if str(text).strip() else '')
+            return
+        preset = emailer.suggest_server(self.sender.text() or text)
         if not preset:
-            self.hint.setText('未识别该邮箱服务商，请手动填写邮件服务器与端口。' if str(text).strip() else '')
+            self.hint.setText('未识别该邮箱服务商，请手动填写邮件服务器与端口。')
             return
         if not self.server.text().strip() or self.server.text().strip() in self.suggested_servers():
             self.server.setText(preset['server'])
@@ -149,6 +170,7 @@ class EmailSettingsForm(QWidget):
     def values(self):
         """Return the settings patch; omit the code unless the user typed one."""
         config = dict(enabled=self.enabled.isChecked(), recipient=self.recipient.text().strip(),
+                      advanced=self.advanced_toggle.isChecked(),
                       sender=self.sender.text().strip(), server=self.server.text().strip(),
                       port=self.port.value(), security=self.security.currentData(),
                       digest_times=[part.strip() for part in self.digest.text().replace('，', ',').split(',') if part.strip()])
@@ -368,7 +390,7 @@ class Window(QMainWindow):
         self.pause = QPushButton('暂停'); self.pause.setFixedWidth(72); self.pause.clicked.connect(self.toggle_pause); top.addWidget(self.pause); body.addLayout(top)
         heading = QHBoxLayout(); title_block = QVBoxLayout(); eyebrow = QLabel('A LITTLE MORE ORGANIZED'); eyebrow.setObjectName('muted'); title_block.addWidget(eyebrow)
         title = QLabel('作业概览'); title.setObjectName('title'); title_block.addWidget(title); title_block.addWidget(QLabel('截止时间看清楚，学习节奏更从容。')); heading.addLayout(title_block); heading.addStretch()
-        self.login = QPushButton('连接慕课'); self.login.clicked.connect(lambda: self.request('login')); heading.addWidget(self.login)
+        self.login = QPushButton('连接慕课'); self.login.clicked.connect(self.open_login); heading.addWidget(self.login)
         self.scan = QPushButton('检查作业'); self.scan.setObjectName('primary'); self.scan.clicked.connect(lambda: self.request('scan')); heading.addWidget(self.scan); body.addLayout(heading)
         self.status = QLabel('在内置窗口中登录慕课，再回来检查作业。'); self.status.setWordWrap(True); self.status.setStyleSheet('background:#edf3ff;border:1px solid #e0e9fb;border-radius:8px;padding:12px;color:#849bc0'); body.addWidget(self.status)
         # Shown until this account has bound both its MOOC page and its email.
@@ -405,9 +427,66 @@ class Window(QMainWindow):
         footer = QHBoxLayout(); footer.addWidget(QLabel(f'{APP_NAME}  {VERSION}')); footer.addStretch(); footer.addWidget(QLabel('本机运行 · 北京时间')); body.addLayout(footer)
         layout.addWidget(main, 1); self.setCentralWidget(outer)
 
-    def request(self, command):
+    def open_login(self):
+        """Offer both ways in: the built-in window, or cookies from a browser."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('连接慕课')
+        dialog.resize(640, 520)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel('选择一种登录方式。两种方式都只把登录状态保存在本机。')
+        intro.setObjectName('muted'); intro.setWordWrap(True); layout.addWidget(intro)
+
+        builtin_title = QLabel('方式一：在内置窗口中登录'); builtin_title.setObjectName('sectionTitle')
+        layout.addWidget(builtin_title)
+        builtin_note = QLabel('打开一个内置浏览器窗口，在里面完成登录即可。适合大多数情况。')
+        builtin_note.setObjectName('muted'); builtin_note.setWordWrap(True); layout.addWidget(builtin_note)
+        builtin_row = QHBoxLayout()
+        builtin = QPushButton('打开内置登录窗口'); builtin.setObjectName('primary')
+        builtin_row.addWidget(builtin); builtin_row.addStretch(); layout.addLayout(builtin_row)
+
+        cookie_title = QLabel('方式二：粘贴浏览器里的 Cookie'); cookie_title.setObjectName('sectionTitle')
+        layout.addWidget(cookie_title)
+        cookie_note = QLabel(
+            '内置窗口打不开或登录不上时用这个。在已登录慕课的浏览器中按 F12 → '
+            '网络（Network）→ 刷新页面 → 点第一个请求 → 找到“Cookie”请求头，'
+            '把它的内容整段复制到这里。')
+        cookie_note.setObjectName('muted'); cookie_note.setWordWrap(True); layout.addWidget(cookie_note)
+        self.cookie_box = QPlainTextEdit()
+        self.cookie_box.setPlaceholderText('NTESSTUDYSI=…; STUDY_SESS=…; EDUWEBDEVICE=…')
+        layout.addWidget(self.cookie_box, 1)
+        cookie_row = QHBoxLayout()
+        cookie_hint = QLabel('只会读取慕课相关的 Cookie，其余内容会被忽略。')
+        cookie_hint.setObjectName('muted'); cookie_hint.setWordWrap(True)
+        cookie_row.addWidget(cookie_hint); cookie_row.addStretch()
+        submit_cookies = QPushButton('用这些 Cookie 登录')
+        cookie_row.addWidget(submit_cookies); layout.addLayout(cookie_row)
+        self.cookie_error = QLabel(''); self.cookie_error.setObjectName('muted'); self.cookie_error.setWordWrap(True)
+        layout.addWidget(self.cookie_error)
+        close = QPushButton('关闭'); layout.addWidget(close)
+
+        def use_builtin():
+            dialog.accept()
+            self.request('login')
+
+        def use_cookies():
+            pasted = self.cookie_box.toPlainText().strip()
+            if not pasted:
+                self.cookie_error.setText('请先粘贴 Cookie。')
+                return
+            if not self.store.is_bound():
+                self.cookie_error.setText('请先绑定慕课主页与邮箱，再登录。')
+                return
+            dialog.accept()
+            self.request('cookie_login', cookies=pasted)
+
+        builtin.clicked.connect(use_builtin)
+        submit_cookies.clicked.connect(use_cookies)
+        close.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def request(self, command, **extra):
         try:
-            self.controller.submit(command)
+            self.controller.submit(command, extra or None)
             self.refresh()
         except Exception as exc:
             self.status.setText(str(exc))

@@ -1,0 +1,7 @@
+{
+  "sender": "",
+  "server": "",
+  "port": 465,
+  "security": "ssl",
+  "password": ""
+}

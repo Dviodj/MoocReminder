@@ -27,6 +27,9 @@ releases/
 # Local account data, browser profiles and credentials never leave the machine.
 data/
 *-profiles/
+# The publisher's sender configuration carries an SMTP credential; only the
+# empty example is tracked.
+email_sender.json
 .env
 .env.*
 *.pem

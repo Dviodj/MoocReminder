@@ -30,7 +30,10 @@ class Controller:
         self.events = queue.Queue()
         self.worker = BrowserWorker(store.folder, self.events, context_provider=context_provider)
         self.worker.start()
-        self.mailer = emailer.Mailer(log=self.log_email, on_result=self.record_email)
+        # The shipped sender settings live next to the program, not in the data
+        # folder, so a user only has to give their own address.
+        self.mailer = emailer.Mailer(log=self.log_email, on_result=self.record_email,
+                                     folder=Path(__file__).parent)
         self.mailer.start()
         self.email_message = ''
         self.busy = False
@@ -80,15 +83,20 @@ class Controller:
     def interval(self):
         return self.store.data['settings']['interval_minutes'] * 60
 
-    def submit(self, job):
+    def submit(self, job, extra=None):
         with self.lock:
             if self.busy:
                 raise ValueError('当前操作还在进行，可以取消后重试。')
             self.busy = True
             self.job = job
             self.job_started = time.monotonic()
-            self.phase = '正在打开登录网页…' if job == 'login' else '正在整理课程与作业…'
-            self.worker.commands.put((job, deepcopy(self.store.data['settings'])))
+            self.phase = ('正在打开登录网页…' if job == 'login'
+                          else '正在用粘贴的 Cookie 登录…' if job == 'cookie_login'
+                          else '正在整理课程与作业…')
+            settings = deepcopy(self.store.data['settings'])
+            if extra:
+                settings.update(extra)
+            self.worker.commands.put((job, settings))
 
     def tick(self):
         with self.lock:
@@ -103,6 +111,12 @@ class Controller:
                     self.busy = False
                     self.phase = '登录网页已打开。完成登录后，点击“检查作业”。'
                     self.job = 'waiting_login'
+                elif kind == 'cookie_ready' and self.busy and self.job == 'cookie_login':
+                    self.busy = False
+                    self.connected = True
+                    self.job = 'ready'
+                    self.phase = f'已用粘贴的 Cookie 登录（{value} 项），正在检查作业…'
+                    self.next_scan = time.monotonic()
                 elif kind == 'error':
                     self.busy = False
                     self.job = 'error'
@@ -193,8 +207,9 @@ class Controller:
         """Validate and send one message so the user can verify the setup."""
         if not config.get('enabled') or not str(config.get('recipient', '')).strip():
             raise ValueError('请先填写接收提醒的邮箱并启用邮件提醒。')
-        if not emailer.password_saved(config.get('password', '')) and not str(config.get('password', '')).strip():
-            raise ValueError('请先填写邮箱授权码。')
+        # A credential the user stored, or the one shipped with the program.
+        if not emailer.resolve_password(config, Path(__file__).parent):
+            raise ValueError('邮件发送账号尚未配置，请在高级选项里填写邮箱授权码。')
         now = now_beijing()
         mail = emailer.Mail(subject='【测试】MoocReminder 邮件提醒已连接',
             text='这是一封测试邮件。\n\n收到它说明邮箱设置正确：作业临近截止时，提醒会发到这个地址。\n\n'
@@ -256,7 +271,9 @@ class Controller:
             email = normalize_email_settings({'email': patch.get('email', settings.get('email', {}))}, settings.get('email'))
             if email['enabled']:
                 try:
-                    emailer.validate(email, secrets_store.decrypt(email['password']))
+                    # The shipped sender settings fill in whatever the user left blank.
+                    emailer.validate(email, emailer.resolve_password(email, Path(__file__).parent),
+                                     Path(__file__).parent)
                 except emailer.EmailError as exc:
                     raise ValueError(str(exc)) from exc
             settings = {**settings, 'email': email}
