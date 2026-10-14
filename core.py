@@ -9,7 +9,9 @@ BEIJING = timezone(timedelta(hours=8))
 HOME_URL = 'https://www.icourse163.org/home.htm?userId=0#/home/course'
 COURSE_URL = 'https://www.icourse163.org/learn/EXAMPLE-1000?tid=1000#/learn/testlist'
 DEFAULT_SETTINGS = dict(home_url=HOME_URL, manual_urls=[], interval_minutes=30,
-                        reminder_hours=[72, 24, 3], include_quizzes=True, include_finished=False)
+                        reminder_hours=[72, 24, 3], include_quizzes=True, include_finished=False,
+                        email=dict(enabled=False, recipient='', sender='', server='', port=465,
+                                   security='ssl', password='', digest_times=[]))
 
 
 def now_beijing():
@@ -53,12 +55,34 @@ class Assignment:
 
 
 def valid_home_url(url):
+    """A well-formed course home link; the url may still be the userId=0 placeholder."""
     p = urlsplit(url)
     return p.scheme == 'https' and p.hostname == 'www.icourse163.org' and p.path == '/home.htm' and bool(parse_qs(p.query).get('userId', [''])[0].isdigit())
 
 
+def bound_home_url(url):
+    """A course home link that names a real account, not the placeholder."""
+    return valid_home_url(url) and account_id(url) not in ('', '0')
+
+
 def account_id(home_url):
     return parse_qs(urlsplit(home_url).query).get('userId', [''])[0]
+
+
+def binding_state(settings):
+    """What an account still has to bind before it can check assignments.
+
+    The MOOC home link decides whose assignments are read; the email decides
+    where reminders are delivered. Both are per account and both are needed.
+    """
+    settings = settings or {}
+    email = settings.get('email') or {}
+    return dict(mooc=bound_home_url(str(settings.get('home_url', '') or '')),
+                email=bool(str(email.get('recipient', '') or '').strip()))
+
+
+def is_bound(settings):
+    return all(binding_state(settings).values())
 
 
 def normalize_course_url(url):
@@ -123,6 +147,24 @@ def due_reminders(items, hours, state, now):
             alerts.append((item, window))
         state[item.revision] = sorted(set(seen + eligible))
     return alerts
+
+
+def due_digests(times, state, now):
+    """Return the daily send times that are due in the current minute."""
+    due = []
+    stamp = now.strftime('%Y-%m-%d')
+    for entry in times or []:
+        match = re.fullmatch(r'(\d{2}):(\d{2})', str(entry))
+        if not match:
+            continue
+        if (int(match.group(1)), int(match.group(2))) != (now.hour, now.minute):
+            continue
+        key = f'digest|{stamp}|{entry}'
+        if key in state:
+            continue
+        state[key] = stamp
+        due.append(entry)
+    return due
 
 
 def remaining_text(item, now):

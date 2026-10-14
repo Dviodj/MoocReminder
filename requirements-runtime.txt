@@ -1,2 +1,2 @@
 PySide6-Essentials==6.12.0
-pythonnet==3.2.1
+PySide6-WebEngine==6.12.0.140

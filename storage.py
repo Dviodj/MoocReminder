@@ -8,7 +8,9 @@ import tempfile
 import sys
 import uuid
 
-from core import Assignment, DEFAULT_SETTINGS, account_id, valid_home_url
+from core import Assignment, DEFAULT_SETTINGS, account_id, binding_state, valid_home_url
+import emailer
+import secrets_store
 
 
 def default_data_dir(portable_base=None):
@@ -31,14 +33,43 @@ def default_data_dir(portable_base=None):
         return Path(portable_base) / 'data'
 
 
+def normalize_email_settings(patch, current=None):
+    """Merge an email patch, keep the stored password unless a new one arrives."""
+    current = dict(current or {})
+    incoming = patch.get('email')
+    if not isinstance(incoming, dict):
+        raise ValueError('邮件设置格式不正确。')
+    merged = {**current, **incoming}
+    password = str(merged.get('password', '') or '')
+    if not password or not secrets_store.protected(password):
+        # Empty means "keep the saved one"; anything else is a fresh secret.
+        merged['password'] = secrets_store.encrypt(password) if password else str(current.get('password', '') or '')
+    try:
+        settings = emailer.EmailSettings.from_settings({'email': merged})
+    except (TypeError, ValueError) as exc:
+        raise ValueError('邮件设置格式不正确。') from exc
+    if not isinstance(settings.enabled, bool) or not isinstance(settings.port, int) or not 1 <= settings.port <= 65535:
+        raise ValueError('邮件设置格式不正确。')
+    if settings.security not in ('ssl', 'starttls'):
+        raise ValueError('邮件加密方式无效。')
+    times = emailer.valid_digest_times(incoming.get('digest_times', current.get('digest_times', [])))
+    if times is None:
+        raise ValueError('发信时刻请填写 HH:MM，例如 08:00 或 08:00,20:00。')
+    merged['digest_times'] = times
+    return dict(enabled=settings.enabled, recipient=settings.recipient.strip(), sender=settings.sender.strip(),
+                server=settings.server.strip(), port=settings.port, security=settings.security,
+                password=merged['password'], digest_times=times)
+
 class Store:
-    def __init__(self, folder=None):
+    def __init__(self, folder=None, settings_base=None):
         self.folder = Path(folder) if folder else default_data_dir()
         self.folder.mkdir(parents=True, exist_ok=True)
         self.path = self.folder / 'data.json'
+        # Settings shared by every account; a profile only overrides its own.
+        self.base_settings = deepcopy(settings_base) if settings_base else {}
         self.warning = ''
         self.data = dict(settings=deepcopy(DEFAULT_SETTINGS), assignments=[], reminders={}, completed=[],
-                         courses=[], last_scan='', errors=[], successful_urls=[])
+                         courses=[], last_scan='', errors=[], successful_urls=[], email_log={})
         if self.path.exists():
             try:
                 saved = json.loads(self.path.read_text(encoding='utf-8'))
@@ -47,7 +78,7 @@ class Store:
                 for row in saved.get('assignments', []):
                     Assignment.from_dict(row)
                 candidate = {**self.data, **saved}
-                candidate['settings'] = {**deepcopy(DEFAULT_SETTINGS), **saved.get('settings', {})}
+                candidate['settings'] = {**deepcopy(DEFAULT_SETTINGS), **self.base_settings, **saved.get('settings', {})}
                 settings = candidate['settings']
                 if (not isinstance(settings['home_url'], str) or not valid_home_url(settings['home_url']) or
                     not isinstance(settings['interval_minutes'], int) or not 5 <= settings['interval_minutes'] <= 1440 or
@@ -57,6 +88,10 @@ class Store:
                     not isinstance(candidate['completed'], list) or not isinstance(candidate['reminders'], dict) or
                     not isinstance(candidate['courses'], list) or not isinstance(candidate['errors'], list)):
                     raise ValueError('本地设置格式无效')
+                normalize_email_settings({'email': candidate['settings'].get('email', {})})
+                if not isinstance(candidate.get('email_log', {}), dict) or any(
+                        not isinstance(key, str) or not isinstance(value, str) for key, value in candidate.get('email_log', {}).items()):
+                    raise ValueError('本地邮件发送记录格式无效')
                 for key in ['completed', 'successful_urls', 'errors']:
                     if not isinstance(candidate[key], list) or any(not isinstance(v, str) for v in candidate[key]):
                         raise ValueError(f'本地 {key} 记录格式无效')
@@ -93,6 +128,13 @@ class Store:
         return [item for item in self.items() if item.revision not in completed and
                 (quizzes or item.kind != '测验')]
 
+    def binding_state(self):
+        """Whether this account has bound both its MOOC course page and its email."""
+        return binding_state(self.data['settings'])
+
+    def is_bound(self):
+        return all(self.binding_state().values())
+
     def mark_completed(self, item, completed):
         revisions = set(self.data['completed'])
         if completed:
@@ -110,12 +152,30 @@ class Store:
         revisions = {item.revision for item in by_id.values()}
         self.data['completed'] = [key for key in self.data['completed'] if key in revisions]
         self.data['reminders'] = {key: value for key, value in self.data['reminders'].items() if key in revisions}
+        self.prune_email_log(revisions)
         self.save()
 
+    def prune_email_log(self, revisions=None):
+        """Keep send history bounded, and drop entries for vanished tasks."""
+        log = self.data['email_log']
+        if revisions is not None:
+            log = {key: value for key, value in log.items()
+                   if not key.startswith('alert|') or key.split('|')[1] in revisions}
+        if len(log) > 500:
+            log = dict(sorted(log.items(), key=lambda pair: str(pair[1]))[-500:])
+        self.data['email_log'] = log
+
     def update_settings(self, settings):
-        changed_account = account_id(settings['home_url']) != account_id(self.data['settings']['home_url'])
+        """Merge a settings patch; only a changed MOOC account clears the cache."""
+        current = self.data['settings']
+        merged = {**deepcopy(current), **deepcopy(settings)}
+        changed_account = account_id(merged['home_url']) != account_id(current['home_url'])
         if changed_account:
+            # The stored tasks and marks belong to the previous MOOC account.
             self.data.update(assignments=[], reminders={}, completed=[], courses=[], last_scan='', errors=[], successful_urls=[])
-        self.data['settings'] = deepcopy(settings)
+        if current.get('email', {}).get('recipient') != merged.get('email', {}).get('recipient'):
+            # A new recipient deserves a fresh set of reminders.
+            self.data['email_log'] = {}
+        self.data['settings'] = merged
         self.save()
         return changed_account

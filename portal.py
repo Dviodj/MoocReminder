@@ -10,8 +10,13 @@ import threading
 import time
 import uuid
 
-from core import now_beijing, due_reminders, remaining_text, account_id, valid_home_url, normalize_course_url
+from core import now_beijing, due_reminders, due_digests, remaining_text, account_id, valid_home_url, normalize_course_url
+from storage import normalize_email_settings
+from version import VERSION
 from worker import BrowserWorker
+
+import emailer
+import secrets_store
 
 ASSETS = Path(__file__).parent / 'web'
 
@@ -19,11 +24,15 @@ ASSETS = Path(__file__).parent / 'web'
 class Controller:
     def __init__(self, store, auto_scan=True, context_provider=None, profile_dir=None):
         self.store = store
+        self.context_provider = context_provider
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.events = queue.Queue()
         self.worker = BrowserWorker(store.folder, self.events, context_provider=context_provider)
         self.worker.start()
+        self.mailer = emailer.Mailer(log=self.log_email, on_result=self.record_email)
+        self.mailer.start()
+        self.email_message = ''
         self.busy = False
         self.connected = False
         self.paused = False
@@ -39,6 +48,34 @@ class Controller:
         self.auto_scan = auto_scan
         if auto_scan and (store.folder / self.profile_dir / account_id(store.data['settings']['home_url'])).exists():
             self.next_scan = time.monotonic() + 5
+
+    def replace_store(self, store):
+        """Switch to another account's profile without restarting the program.
+
+        The browser worker is restarted so it releases the previous account's
+        cookies, but the embedded browser itself stays open, so a profile that
+        is already logged in comes back without signing in again.
+        """
+        with self.lock:
+            previous = self.worker
+            previous.stop()
+            previous.join(timeout=5)
+            self.store = store
+            # A fresh queue, so events from the account we just left are dropped.
+            self.events = queue.Queue()
+            self.worker = BrowserWorker(store.folder, self.events, context_provider=self.context_provider)
+            self.worker.start()
+            self.busy = False
+            self.job = ''
+            self.connected = False
+            self.email_message = ''
+            self.phase = '已切换到' + (store.data['settings'].get('name') or '另一个账号') + '，正在恢复上次结果。'
+            self.next_scan = time.monotonic() + self.interval()
+            profile_exists = (store.folder / self.profile_dir /
+                              account_id(store.data['settings']['home_url'])).exists()
+            if profile_exists:
+                self.next_scan = time.monotonic() + 5
+            return profile_exists
 
     def interval(self):
         return self.store.data['settings']['interval_minutes'] * 60
@@ -95,14 +132,79 @@ class Controller:
                 self.phase = '操作耗时过长，正在取消。稍后可以重新连接。'
             if not self.paused and not self.stopping:
                 state = deepcopy(self.store.data['reminders'])
-                alerts = due_reminders(self.store.active_items(), self.store.data['settings']['reminder_hours'], state, now_beijing())
+                active = self.store.active_items()
+                alerts = due_reminders(active, self.store.data['settings']['reminder_hours'], state, now_beijing())
                 if alerts:
                     self.add_notification(alerts)
                     self.store.data['reminders'] = state
-                    self.store.save()
+                digest_due = due_digests(self.store.data['settings']['email'].get('digest_times'),
+                                         self.store.data['email_log'], now_beijing())
+                self.dispatch_email(alerts, digest_due, active)
+                self.store.save()
                 profile_exists = (self.store.folder / self.profile_dir / account_id(self.store.data['settings']['home_url'])).exists()
                 if (self.connected or (self.auto_scan and profile_exists)) and not self.busy and time.monotonic() >= self.next_scan:
                     self.submit('scan')
+
+    def email_config(self):
+        with self.lock:
+            return deepcopy(self.store.data['settings'].get('email') or {})
+
+    def log_email(self, message):
+        with self.lock:
+            self.email_message = str(message)
+
+    def record_email(self, key, ok, detail):
+        with self.lock:
+            attempts = int(self.store.data['email_log'].get('attempt|' + key, '0') or 0)
+            self.store.data['email_log'][key] = ('sent ' if ok else 'failed ') + now_beijing().isoformat(timespec='seconds')
+            if not ok:
+                self.store.data['email_log']['attempt|' + key] = str(attempts + 1)
+                self.email_message = detail or '邮件发送失败，请查看连接详情。'
+            else:
+                self.store.data['email_log'].pop('attempt|' + key, None)
+            revision = key.split('|')[1] if key.startswith('alert|') else None
+            self.store.prune_email_log({revision} if revision else None)
+            self.store.save()
+
+    def dispatch_email(self, alerts, digest_due, active):
+        """Queue the emails that this tick makes due; never blocks on delivery."""
+        config = self.store.data['settings'].get('email') or {}
+        if not config.get('enabled') or not str(config.get('recipient', '')).strip():
+            return False
+        log = self.store.data['email_log']
+        queued = False
+        for window in sorted({window for _, window in alerts or []}):
+            group = [item for item, item_window in alerts or [] if item_window == window]
+            key = f'alert|{group[0].revision}|{window}'
+            if key in log or int(log.get('attempt|' + key, '0') or 0) >= 3:
+                continue
+            queued = self.mailer.enqueue(key, deepcopy(config), emailer.compose_alert(group, window, now_beijing())) or queued
+        for stamp in digest_due or []:
+            key = f'digest|{now_beijing().strftime("%Y-%m-%d")}|{stamp}'
+            if key in log or int(log.get('attempt|' + key, '0') or 0) >= 3:
+                continue
+            pending = [item for item in active if not item.deadline or item.deadline > now_beijing()]
+            if not pending:
+                continue
+            queued = self.mailer.enqueue(key, deepcopy(config), emailer.compose_digest(pending, now_beijing())) or queued
+        return queued
+
+    def send_test_email(self, config):
+        """Validate and send one message so the user can verify the setup."""
+        if not config.get('enabled') or not str(config.get('recipient', '')).strip():
+            raise ValueError('请先填写接收提醒的邮箱并启用邮件提醒。')
+        if not emailer.password_saved(config.get('password', '')) and not str(config.get('password', '')).strip():
+            raise ValueError('请先填写邮箱授权码。')
+        now = now_beijing()
+        mail = emailer.Mail(subject='【测试】MoocReminder 邮件提醒已连接',
+            text='这是一封测试邮件。\n\n收到它说明邮箱设置正确：作业临近截止时，提醒会发到这个地址。\n\n'
+                 f'发送时间：{now.strftime("%Y-%m-%d %H:%M")}\n—— 由 MoocReminder 自动发送，请勿直接回复。',
+            html='<div style="font-family:Microsoft YaHei UI,Segoe UI,sans-serif;padding:20px;color:#28364c">'
+                 '<h2 style="margin:0 0 10px">邮件提醒已连接</h2>'
+                 '<p style="color:#7e8da3;margin:0 0 12px">这是一封测试邮件。作业临近截止时，提醒会发到这个地址。</p>'
+                 f'<p style="color:#a3adbe;font-size:12px;margin:0">发送时间：{now.strftime("%Y-%m-%d %H:%M")}</p></div>')
+        self.mailer.enqueue('test|' + uuid.uuid4().hex, deepcopy(config), mail)
+        return True
 
     def add_notification(self, alerts=None, test=False):
         with self.lock:
@@ -135,7 +237,8 @@ class Controller:
                 elapsed=round(time.monotonic() - self.job_started) if self.busy else 0,
                 next_check=max(0, int(self.next_scan - time.monotonic())), last_scan=self.store.data['last_scan'],
                 errors=list(self.store.data['errors']), courses=deepcopy(self.store.data['courses']),
-                notifications=deepcopy(self.notifications), data_folder=str(self.store.folder))
+                notifications=deepcopy(self.notifications), data_folder=str(self.store.folder),
+                email_log=deepcopy(self.store.data['email_log']), email_status=self.email_message)
 
     def settings(self, patch):
         with self.lock:
@@ -150,6 +253,13 @@ class Controller:
                 raise ValueError('作业链接需要来自慕课官网，并包含学期 tid。')
             if not all(isinstance(settings[k], bool) for k in ['include_quizzes', 'include_finished']):
                 raise ValueError('提醒选项无效。')
+            email = normalize_email_settings({'email': patch.get('email', settings.get('email', {}))}, settings.get('email'))
+            if email['enabled']:
+                try:
+                    emailer.validate(email, secrets_store.decrypt(email['password']))
+                except emailer.EmailError as exc:
+                    raise ValueError(str(exc)) from exc
+            settings = {**settings, 'email': email}
             changed = self.store.update_settings(settings)
             self.next_scan = time.monotonic() + self.interval()
             if changed:
@@ -159,6 +269,7 @@ class Controller:
     def stop(self):
         self.stopping = True
         self.worker.stop()
+        self.mailer.stop()
 
 
 def create_server(controller, port=0):
@@ -191,6 +302,9 @@ def create_server(controller, port=0):
                 return self.send_json(404, {'error': '页面不存在'})
             name, kind = files[path]
             content = (ASSETS / name).read_bytes()
+            # The displayed version has a single source of truth in version.py.
+            if name == 'index.html':
+                content = content.replace(b'{{VERSION}}', VERSION.encode('utf-8'))
             self.send_response(200)
             self.send_header('Content-Type', kind)
             self.send_header('Content-Length', str(len(content)))
@@ -233,6 +347,9 @@ def create_server(controller, port=0):
                         if not item:
                             raise ValueError('没有找到这项作业')
                         controller.store.mark_completed(item, bool(data.get('completed')))
+                    elif self.path == '/api/test-email':
+                        config = normalize_email_settings({'email': {**controller.email_config(), **data}}, controller.email_config())
+                        controller.send_test_email(config)
                     elif self.path == '/api/test-notification':
                         controller.add_notification(test=True)
                     elif self.path == '/api/quit':
@@ -240,6 +357,8 @@ def create_server(controller, port=0):
                     else:
                         return self.send_json(404, {'error': '操作不存在'})
                 return self.send_json(200, {'ok': True})
+            except emailer.EmailError as exc:
+                return self.send_json(400, {'error': str(exc)})
             except (ValueError, TypeError, KeyError, OSError) as exc:
                 return self.send_json(400, {'error': str(exc)})
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
