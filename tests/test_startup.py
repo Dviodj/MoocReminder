@@ -65,13 +65,142 @@ class StartupCleanupTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
                 plan = dict(python=sys.executable, base_python=sys.executable,version=[3,13,9], venv_ready=True)
-                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.create_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time.monotonic', side_effect=[0,21]):
+                # Replace only the launcher's view of the clock.  Patching the
+                # global time module also reached desktop_shortcut, whose
+                # shortcut-write loop calls monotonic(), so the two fought over
+                # this finite side_effect and the test failed at random.
+                ticks = iter([0, 21])
+                clock = SimpleNamespace(monotonic=lambda: next(ticks))
+                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.create_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time', clock):
                     with self.assertRaisesRegex(RuntimeError, '启动确认'):
                         source_launcher.run_app(Path(folder), [])
                 self.assertIsNotNone(child.poll(), 'startup failure left its process running')
         finally:
             if child.poll() is None:
                 child.terminate();child.wait(timeout=3)
+
+    def test_declining_the_shortcut_leaves_the_desktop_untouched(self):
+        """Answering no must not delete anything.
+
+        The retraction used to run unconditionally, so a same-named shortcut
+        belonging to another program made the launcher warn about a shortcut
+        the user had just refused.
+        """
+        original_run, original_popen = subprocess.run, subprocess.Popen
+        child = subprocess.Popen([getattr(sys, '_base_executable', sys.executable), '-c', 'import time; time.sleep(30)'])
+        def run(args, **kwargs):
+            return subprocess.CompletedProcess(args,0) if '-c' in args or '--prepare' in args else original_run(args, **kwargs)
+        def popen(args, **kwargs):
+            return child if str(args[0]).endswith('pythonw.exe') else original_popen(args, **kwargs)
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                plan = dict(python=sys.executable, base_python=sys.executable,version=[3,13,9], venv_ready=True)
+                ticks = iter([0, 21])
+                clock = SimpleNamespace(monotonic=lambda: next(ticks))
+                created, removed = [], []
+                def record_create(*args, **kwargs):
+                    created.append((args, kwargs))
+                def record_remove(*args, **kwargs):
+                    removed.append((args, kwargs))
+                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.desktop_shortcut_ready',return_value=False), patch('source_launcher.owns_shortcut',return_value=False), patch('source_launcher.create_desktop_shortcut',side_effect=record_create), patch('source_launcher.remove_desktop_shortcut',side_effect=record_remove), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time', clock):
+                    with self.assertRaisesRegex(RuntimeError, '启动确认'):
+                        source_launcher.run_app(Path(folder), [], confirm=lambda question: False)
+                self.assertEqual(created, [], 'declining still created a shortcut')
+                self.assertEqual(removed, [], 'declining tried to delete a shortcut it does not own')
+        finally:
+            if child.poll() is None:
+                child.terminate();child.wait(timeout=3)
+
+    def test_accepting_creates_the_shortcut_once(self):
+        original_run, original_popen = subprocess.run, subprocess.Popen
+        child = subprocess.Popen([getattr(sys, '_base_executable', sys.executable), '-c', 'import time; time.sleep(30)'])
+        def run(args, **kwargs):
+            return subprocess.CompletedProcess(args,0) if '-c' in args or '--prepare' in args else original_run(args, **kwargs)
+        def popen(args, **kwargs):
+            return child if str(args[0]).endswith('pythonw.exe') else original_popen(args, **kwargs)
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                plan = dict(python=sys.executable, base_python=sys.executable,version=[3,13,9], venv_ready=True)
+                ticks = iter([0, 21])
+                clock = SimpleNamespace(monotonic=lambda: next(ticks))
+                created, asked = [], []
+                def record_create(*args, **kwargs):
+                    created.append((args, kwargs))
+                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.desktop_shortcut_ready',return_value=False), patch('source_launcher.owns_shortcut',return_value=False), patch('source_launcher.create_desktop_shortcut',side_effect=record_create), patch('source_launcher.remove_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time', clock):
+                    def confirm(question):
+                        asked.append(question)
+                        return True
+                    with self.assertRaisesRegex(RuntimeError, '启动确认'):
+                        source_launcher.run_app(Path(folder), [], confirm=confirm)
+                self.assertEqual(len(created), 1, 'accepting should create exactly one shortcut')
+                self.assertEqual(len(asked), 1, 'the user should be asked exactly once')
+                self.assertIn('快捷方式', asked[0])
+        finally:
+            if child.poll() is None:
+                child.terminate();child.wait(timeout=3)
+
+    def test_a_shortcut_we_own_is_repaired_without_asking(self):
+        """A moved project must not re-prompt: the user already agreed."""
+        original_run, original_popen = subprocess.run, subprocess.Popen
+        child = subprocess.Popen([getattr(sys, '_base_executable', sys.executable), '-c', 'import time; time.sleep(30)'])
+        def run(args, **kwargs):
+            return subprocess.CompletedProcess(args,0) if '-c' in args or '--prepare' in args else original_run(args, **kwargs)
+        def popen(args, **kwargs):
+            return child if str(args[0]).endswith('pythonw.exe') else original_popen(args, **kwargs)
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                plan = dict(python=sys.executable, base_python=sys.executable,version=[3,13,9], venv_ready=True)
+                ticks = iter([0, 21])
+                clock = SimpleNamespace(monotonic=lambda: next(ticks))
+                created, asked = [], []
+                def record_create(*args, **kwargs):
+                    created.append((args, kwargs))
+                with patch('source_launcher.runtime_plan', return_value=plan), patch('source_launcher.run_command',return_value=0), patch('source_launcher.desktop_shortcut_ready',return_value=False), patch('source_launcher.owns_shortcut',return_value=True), patch('source_launcher.create_desktop_shortcut',side_effect=record_create), patch('source_launcher.remove_desktop_shortcut',return_value=None), patch('source_launcher.subprocess.run', side_effect=run), patch('source_launcher.subprocess.Popen', side_effect=popen), patch('source_launcher.time', clock):
+                    def confirm(question):
+                        asked.append(question)
+                        return True
+                    with self.assertRaisesRegex(RuntimeError, '启动确认'):
+                        source_launcher.run_app(Path(folder), [], confirm=confirm)
+                self.assertEqual(len(created), 1, 'a stale shortcut of ours should be repaired')
+                self.assertEqual(asked, [], 'repairing our own shortcut must not prompt again')
+        finally:
+            if child.poll() is None:
+                child.terminate();child.wait(timeout=3)
+
+    def _launch_writing(self, report_fields, workspace_args):
+        """Run the launcher against a child that reports the given readiness."""
+        captured = {}
+        def launch(args, **kwargs):
+            captured.update(args=args, kwargs=kwargs)
+            ready = Path(args[args.index('--startup-report') + 1])
+            ready.write_text(json.dumps(report_fields), encoding='utf-8')
+            return SimpleNamespace(poll=lambda: None, wait=lambda: 0)
+        plan = dict(python=sys.executable, base_python=sys.executable, version=[3, 13, 9], venv_ready=True)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            with patch('source_launcher.runtime_plan', return_value=plan), \
+                 patch('source_launcher.run_command', return_value=0), \
+                 patch('source_launcher.create_desktop_shortcut', return_value=None), \
+                 patch('source_launcher.remove_desktop_shortcut', return_value=None), \
+                 patch('source_launcher.subprocess.Popen', side_effect=launch):
+                code = source_launcher.run_app(Path(folder), workspace_args)
+        return code, captured
+
+    def test_a_sign_in_copy_is_accepted_without_a_window(self):
+        """At sign-in there is no window, and that must not be read as failure.
+
+        The readiness check used to demand a visible window, so the launcher
+        declared the background copy dead and shut it down -- the autostart
+        entry could never work.
+        """
+        code, captured = self._launch_writing(
+            dict(ready=True, native_window=False, background=True), ['--background'])
+        self.assertEqual(code, 0)
+        self.assertIn('--background', captured['args'])
+
+    def test_a_second_copy_hands_over_and_exits(self):
+        code, _ = self._launch_writing(
+            dict(ready=True, already_running=True, background=False), [])
+        self.assertEqual(code, 0)
 
 
 if __name__ == '__main__':

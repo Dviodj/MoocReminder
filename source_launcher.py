@@ -12,7 +12,9 @@ import sys
 import tempfile
 import time
 import uuid
-from desktop_shortcut import create_desktop_shortcut
+from desktop_shortcut import (BACKGROUND_ARGUMENT, create_desktop_shortcut,
+    desktop_shortcut_ready, owns_shortcut, remove_desktop_shortcut)
+import autostart
 
 
 def probe_output(args, cancelled, timeout, workspace=None):
@@ -340,17 +342,22 @@ def startup_lock(state):
         handle.close()
 
 
-def run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
+def run_app(workspace, app_args, wait=False, progress=None, cancelled=None, confirm=None):
     workspace=Path(workspace).resolve()
     if cancelled and cancelled():
         raise InterruptedError('启动已取消')
     with startup_lock(workspace/'.launcher-state'):
-        return _run_app(workspace,app_args,wait,progress,cancelled)
+        return _run_app(workspace,app_args,wait,progress,cancelled,confirm)
 
 
-def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
+def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None, confirm=None):
     workspace = Path(workspace).resolve()
     cancelled = cancelled or (lambda:False)
+    if BACKGROUND_ARGUMENT in app_args:
+        # Started by Windows at sign-in: there is nobody to answer a question,
+        # so never ask one and never create an entry the user did not request.
+        # Repairing a shortcut they already agreed to stays silent and allowed.
+        confirm = lambda question: False
     def update(percent, phase, detail='', indeterminate=False, kind='progress'):
         if cancelled():
             raise InterruptedError('启动已取消')
@@ -416,12 +423,43 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
         update(65,'准备网页组件','已验证的组件会在后续启动时直接复用。',not warm)
         update(78,'创建桌面入口','以后可以直接从桌面打开。')
         try:
-            create_desktop_shortcut(workspace,cancelled=cancelled)
+            want_link = True
+            if not desktop_shortcut_ready(workspace,python):
+                # Only ask when there is nothing of ours to repair: a stale
+                # shortcut from a previous location is fixed silently, because
+                # the user already agreed to having one.
+                if owns_shortcut(workspace):
+                    update(78,'更新桌面入口','程序位置已变化，正在修正快捷方式。')
+                else:
+                    want_link = confirm('要在桌面上创建 MoocReminder 快捷方式吗？\n\n'
+                        '以后可以从桌面直接打开，不需要每次进文件夹。') if confirm else True
+            if want_link:
+                create_desktop_shortcut(workspace,python=python,cancelled=cancelled)
+            else:
+                if owns_shortcut(workspace):
+                    # Only retract a shortcut of ours.  A same-named one
+                    # belonging to another program must be left alone, and
+                    # trying to delete it would raise a warning about a
+                    # shortcut the user just refused.
+                    remove_desktop_shortcut(workspace)
+                update(78,'未创建桌面入口','需要时可以从程序文件夹打开。')
         except InterruptedError:
             raise
         except Exception as exc:
             log.write('快捷方式：'+str(exc)+'\n');log.flush()
             update(78,'桌面入口暂未创建','可以继续从文件夹打开；主程序正在启动。',kind='warning')
+        try:
+            # Only ever repair.  Turning autostart on is the user's decision, made
+            # from the prompt on the overview page or the box in the settings, and
+            # asking here would put a second question in front of them at startup.
+            if autostart.enabled(workspace) and not autostart.ready(workspace, python):
+                update(84,'修正开机启动','程序位置已变化，正在修正开机启动项。')
+                autostart.enable(workspace, python=python, cancelled=cancelled)
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            log.write('开机启动：'+str(exc)+'\n');log.flush()
+            update(84,'开机启动项未修正','不影响本次使用；可在设置里重新勾选。',kind='warning')
         update(88,'打开学习空间','正在启动主窗口。')
         ready = state/('ready-'+uuid.uuid4().hex+'.json')
         gui_python = python.with_name('pythonw.exe')
@@ -437,8 +475,15 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
                     raise InterruptedError('启动已取消')
                 if ready.exists():
                     report = json.loads(ready.read_text(encoding='utf-8'))
-                    if report.get('native_window'):
-                        log.write('主窗口启动成功\n');log.flush()
+                    # A background start has no window on purpose, and a second
+                    # launch hands over to the copy that is already running;
+                    # both are successes, not a window that failed to appear.
+                    if report.get('ready') or report.get('native_window'):
+                        if report.get('already_running'):
+                            log.write('已有实例在运行，已切换到该窗口\n');log.flush()
+                            update(100,'已在运行','MoocReminder 已经打开，已切换到那个窗口。')
+                            return 0
+                        log.write('主窗口启动成功\n' if not report.get('background') else '已在后台启动\n');log.flush()
                         signature = cache_fingerprint(workspace,python)
                         if signature:
                             temporary = state/('ready-runtime-'+uuid.uuid4().hex+'.tmp')
@@ -451,7 +496,10 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None):
                             finally:
                                 try:temporary.unlink(missing_ok=True)
                                 except OSError:pass
-                        update(100,'准备就绪','主窗口已打开。')
+                        if report.get('background'):
+                            update(100,'已在后台运行','MoocReminder 正在托盘里运行，提醒照常。')
+                        else:
+                            update(100,'准备就绪','主窗口已打开。')
                         if wait:
                             while process.poll() is None:
                                 if cancelled():

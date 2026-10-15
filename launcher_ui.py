@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 
 class StartupWorker:
@@ -19,10 +19,29 @@ class StartupWorker:
         self.events = queue.Queue()
         self.cancelled = threading.Event()
         self.thread = None
+        self.answers = queue.Queue()
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def confirm(self, question):
+        """Ask the user something from the worker thread and wait for the reply.
+
+        The window answers through `reply`; a cancel unblocks the wait so a
+        stalled prompt can never trap the launcher.
+        """
+        self.events.put({'kind': 'ask', 'question': question})
+        while True:
+            if self.cancelled.is_set():
+                raise InterruptedError('启动已取消')
+            try:
+                return bool(self.answers.get(timeout=.1))
+            except queue.Empty:
+                continue
+
+    def reply(self, value):
+        self.answers.put(bool(value))
 
     def _run(self):
         try:
@@ -33,7 +52,8 @@ class StartupWorker:
             def progress(event):
                 self.events.put(dict(event, kind=event.get('kind', 'progress')))
             result = runner(self.workspace, self.app_args, wait=self.wait,
-                            progress=progress, cancelled=self.cancelled.is_set)
+                            progress=progress, cancelled=self.cancelled.is_set,
+                            confirm=self.confirm)
             if self.cancelled.is_set():
                 self.events.put({'kind': 'cancelled'})
             elif result:
@@ -62,6 +82,7 @@ class StartupWorker:
         self.cancelled.clear()
         self.drain()
         self.start()
+
 
 
 def parse_args(argv=None):
@@ -205,6 +226,16 @@ class StartupWindow:
         self.clear_timers()
         self.root.destroy()
 
+    def ask(self, question):
+        """Show a yes/no prompt inside the startup window.
+
+        A modal dialog is the right shape here: the worker thread is blocked
+        waiting for the answer, and the progress bar has nothing to report
+        until it gets one.
+        """
+        answer = messagebox.askyesno('MoocReminder', question, parent=self.root)
+        self.worker.reply(answer)
+
     def poll(self):
         self.ticks += 1
         for event in self.worker.drain():
@@ -220,6 +251,8 @@ class StartupWindow:
                 self.cancel_button.configure(state='normal', text='关闭')
                 if self.closing:
                     self.finish('cancelled'); return
+            elif kind == 'ask':
+                self.schedule(10, lambda question=event.get('question', ''): self.ask(question))
             else:
                 self.phase.set(event.get('phase', '正在启动'))
                 self.detail.set(event.get('detail', ''))

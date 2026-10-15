@@ -98,6 +98,20 @@ class WindowTests(unittest.TestCase):
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.root.update(); time.sleep(.01)
+    def pump_until(self, predicate, timeout=5.0):
+        """Pump the event loop until `predicate` holds, or fail on timeout.
+
+        Wall-clock pumping made this suite fail whenever a slower neighbour
+        test was running, because the tick count depends on machine load.
+        """
+        import time
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.root.update()
+            if predicate():
+                return True
+            time.sleep(.01)
+        return False
     def test_destroy_cancels_owned_timers(self):
         worker = self.ui.StartupWorker(ROOT, [], runner=lambda *a, **kw: 0)
         window = self.ui.StartupWindow(self.root, worker)
@@ -133,8 +147,8 @@ class WindowTests(unittest.TestCase):
             raise InterruptedError()
         worker = self.ui.StartupWorker(ROOT, [], runner=runner)
         window = self.ui.StartupWindow(self.root, worker)
-        self.pump(.35)
-        self.assertGreater(window.ticks, 2)
+        self.assertTrue(self.pump_until(lambda: window.ticks > 2),
+            'startup window stopped responding while the worker ran')
         self.assertTrue(worker.thread.is_alive())
         window.cancel()
         worker.thread.join(2)
