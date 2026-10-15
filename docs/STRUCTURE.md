@@ -40,7 +40,6 @@ MoocReminder/
 ├─ assets/                              图标
 ├─ docs/                                验证记录与本文件
 ├─ tests/                               自动测试
-├─ web/                                 网页版界面资源（见“历史遗留”）
 ├─ .launcher-state/                     **本机运行时状态**：启动日志、运行缓存、快捷方式记录
 └─ .build/                              **本机产物**：构建、发布、实测的一切输出（见下）
 ```
@@ -144,19 +143,20 @@ webview2-profiles/<userId>/  一个账号的登录状态（Cookies 等）
 | `load_store(key)` | 取出账号档案 |
 | `save_shared(settings)` | 保存所有账号共用的偏好 |
 
-### 历史遗留（保留中，未参与桌面运行）
+### 历史遗留与已清理
 
-这些文件为早期方案所写，目前只被测试引用或完全不被引用。**归档说明，暂不删除**；将来确认不再需要时，删除它们并同步移除对应测试即可。
+早期方案留下、又不在桌面运行链路上的文件已删除：
 
-| 文件 | 原用途 | 现状 |
+| 已删除 | 原用途 | 删除原因 |
 | --- | --- | --- |
-| `gui.py` | 第一版 Tkinter 界面 | 仅 `tests/test_gui.py` 引用，桌面版不用 |
-| `web/`（`index.html`、`app.css`、`app.js`） | 网页版界面资源 | 桌面版不起 HTTP 服务，仅 `tests/test_portal.py` 用到；页脚版本号由 `portal.py` 在提供页面时注入 `version.py` 的值 |
-| `launch.bat` | 原用户入口 | 现为源码检出的等价入口，转调 `启动MoocReminder.bat`；发布包只含后者 |
-| `portal.create_server` | 本机 HTTP 服务与访问校验 | 仅测试使用，桌面版直接调 `Controller` |
-| `qt_login_click_check.py` | 登录按钮的人工实测脚本 | 需要交互式 Windows 桌面手工运行，不属于自动测试 |
+| `gui.py`、`tests/test_gui.py` | 第一版 Tkinter 界面 | 桌面版用 `qt_desktop.py`；这两个文件只互相引用 |
+| `web/`（`index.html`、`app.css`、`app.js`）、`portal.create_server` | 本机 HTTP 服务与网页版界面 | 桌面版直接调 `Controller`，HTTP 服务只被测试用到；页脚版本注入随之取消，界面版本号仍由 `version.py` 统一提供 |
+| `qt_login_click_check.py` | 登录按钮的人工实测脚本 | 直接运行程序点一次即可验证，不需要专用脚本 |
+| `docs/superpowers/plans/task-2-native-smoke.json` | 某次 native 适配实测的输出快照 | 实测产物，全仓库零引用 |
 
-**已在本次迁移中删除**：`webview2_reader.py`、`webview_runtime.py`、`dom_adapter.py`、
+`launch.bat` **保留**：它是源码检出的等价入口，转调 `启动MoocReminder.bat`；发布包只含后者。
+
+**更早一次迁移中删除**：`webview2_reader.py`、`webview_runtime.py`、`dom_adapter.py`、
 `native_browser.py`、`native_adapter_smoke.py`、`.native-webview/`（5 个 SDK 文件），
 以及 `browser.py` 的 Playwright 回退分支。它们的整套依赖（.NET Desktop Runtime 与
 WebView2 Runtime）也随之不再需要。

@@ -118,12 +118,12 @@
 | 路径 | 内容 |
 | --- | --- |
 | 根目录 `*.py` | 启动器、主界面、读取逻辑与打包脚本，全部扁平放置 |
-| `assets/`、`docs/`、`tests/`、`web/` | 图标、验证记录与结构说明、自动测试、网页版界面资源 |
+| `assets/`、`docs/`、`tests/` | 图标、验证记录与结构说明、自动测试 |
 | `LICENSE`、`THIRD-PARTY-NOTICES.md`、`licenses/` | 本项目 MIT 许可证、随包第三方组件声明、Qt 的 LGPL/GPL 正文 |
 | `.launcher-state/` | 本机启动日志与运行缓存，按已发布离线包的布局保留在根目录 |
 | `.build/` | `runtime-bundle/`（解压好的运行组件）、`wheel-cache/`、`releases/`、`temp/`、`artifacts/` |
 
-各文件的用途、当前运行链路，以及 `gui.py`、`qt_reader.py`、`web/` 等历史遗留文件的现状，见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
+各文件的用途与当前运行链路见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
 
 ## 开发与验证
 
@@ -135,9 +135,9 @@ python -m venv .venv
 
 开发环境约 760 MB（QtWebEngine 占大部分）。`test_site` 与 `test_qt_reader` 会真实渲染页面，请在有图形界面的 Windows 会话运行，不需要联网。
 
-当前开发状态为 **290 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。桌面快捷方式与开机自启动相关的测试需要 Windows 与 PowerShell。v0.1.1 发布时通过 83 项。
+当前开发状态为 **283 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。桌面快捷方式与开机自启动相关的测试需要 Windows 与 PowerShell。v0.1.1 发布时通过 83 项。
 
-发布者制作便携包：先运行 `python bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。`qt_login_click_check.py` 用于人工验证真实的“连接慕课”按钮。
+发布者制作便携包：先运行 `python bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。真实的“连接慕课”按钮需要人工验证时，直接运行程序点一次即可。
 
 课程读取依赖官网当前页面结构。登录失效或网站结构变化时，程序会显示错误并保留缓存。
 
