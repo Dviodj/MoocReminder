@@ -1,8 +1,9 @@
-playwright==1.63.0
-pyinstaller==6.22.3
-websocket-client==1.9.2
+# Development environment. The published runtime uses requirements-runtime.txt.
+#
+# Playwright, pythonnet and PyInstaller were removed with the QtWebEngine
+# migration: the app renders the site with QtWebEngine now, so nothing imports
+# playwright, pythonnet, websocket-client or PyInstaller any more.
 PySide6==6.12.0
-# test_qt_reader.py imports PySide6.QtWebEngineCore. Qt ships that module in its
-# own distribution, not in PySide6-Essentials or PySide6-Addons.
+# test_qt_reader.py and test_site.py import PySide6.QtWebEngineCore. Qt ships
+# that module in its own distribution, not in PySide6-Essentials or -Addons.
 PySide6-WebEngine==6.12.0.140
-pythonnet==3.2.1
