@@ -1,11 +1,8 @@
-"""Responsive local interface service; browser operations remain on their worker."""
+"""Interface state machine and reminder rules; browser operations stay on their worker."""
 from copy import deepcopy
 from datetime import timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import json
 import queue
-import secrets
 import threading
 import time
 import uuid
@@ -13,20 +10,15 @@ import uuid
 from core import (now_beijing, due_reminders, due_digests, remaining_text, account_id,
                   normalize_home_url, home_url_problem, course_url_problem)
 from storage import normalize_email_settings
-from version import VERSION
 from worker import BrowserWorker
 
 import emailer
-import secrets_store
-
-ASSETS = Path(__file__).parent / 'web'
 
 
 class Controller:
     def __init__(self, store, auto_scan=True, context_provider=None, profile_dir=None):
         self.store = store
         self.context_provider = context_provider
-        self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.events = queue.Queue()
         self.worker = BrowserWorker(store.folder, self.events, context_provider=context_provider)
@@ -46,7 +38,6 @@ class Controller:
         self.job_started = 0
         self.notifications = []
         self.pending_popups = []
-        self.closed_at = None
         self.next_scan = time.monotonic() + self.interval()
         self.profile_dir = profile_dir or ('web-profiles' if context_provider else 'native-profiles')
         self.auto_scan = auto_scan
@@ -330,97 +321,3 @@ class Controller:
         self.stopping = True
         self.worker.stop()
         self.mailer.stop()
-
-
-def create_server(controller, port=0):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def send_json(self, status, data):
-            content = json.dumps(data, ensure_ascii=False).encode('utf-8')
-            self.send_response(status)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', str(len(content)))
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.end_headers()
-            self.wfile.write(content)
-
-        def allowed(self):
-            return secrets.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + controller.token)
-
-        def do_GET(self):
-            path = self.path.split('?')[0]
-            if path == '/api/state':
-                if not self.allowed():
-                    return self.send_json(401, {'error': '未授权'})
-                controller.closed_at = None
-                return self.send_json(200, controller.snapshot())
-            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.css': ('app.css', 'text/css; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8')}
-            if path not in files:
-                return self.send_json(404, {'error': '页面不存在'})
-            name, kind = files[path]
-            content = (ASSETS / name).read_bytes()
-            # The displayed version has a single source of truth in version.py.
-            if name == 'index.html':
-                content = content.replace(b'{{VERSION}}', VERSION.encode('utf-8'))
-            self.send_response(200)
-            self.send_header('Content-Type', kind)
-            self.send_header('Content-Length', str(len(content)))
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-            self.end_headers()
-            self.wfile.write(content)
-
-        def do_POST(self):
-            try:
-                length = int(self.headers.get('Content-Length', 0))
-                if length > 64000:
-                    return self.send_json(413, {'error': '请求过大'})
-                data = json.loads(self.rfile.read(length) or b'{}')
-                origin = self.headers.get('Origin')
-                expected_origin = f'http://127.0.0.1:{self.server.server_port}'
-                if origin and origin != expected_origin:
-                    return self.send_json(403, {'error': '不允许来自其他网页的操作'})
-                if self.path == '/api/closing' and origin == expected_origin and isinstance(data, dict) and data.get('token') == controller.token:
-                    controller.closed_at = time.monotonic()
-                    return self.send_json(200, {'ok': True})
-                if not self.allowed():
-                    return self.send_json(401, {'error': '未授权'})
-                if not isinstance(data, dict):
-                    raise ValueError('请求格式不正确')
-                with controller.lock:
-                    if self.path in ['/api/login', '/api/scan']:
-                        controller.submit('login' if self.path == '/api/login' else 'scan')
-                        return self.send_json(202, {'ok': True})
-                    if self.path == '/api/cancel':
-                        controller.worker.cancel()
-                        controller.phase = '正在取消当前操作…'
-                    elif self.path == '/api/settings':
-                        controller.settings(data)
-                    elif self.path == '/api/pause':
-                        controller.paused = bool(data.get('paused'))
-                    elif self.path == '/api/complete':
-                        item = next((item for item in controller.store.items() if item.uid == data.get('uid')), None)
-                        if not item:
-                            raise ValueError('没有找到这项作业')
-                        controller.store.mark_completed(item, bool(data.get('completed')))
-                    elif self.path == '/api/test-email':
-                        config = normalize_email_settings({'email': {**controller.email_config(), **data}}, controller.email_config())
-                        controller.send_test_email(config)
-                    elif self.path == '/api/test-notification':
-                        controller.add_notification(test=True)
-                    elif self.path == '/api/quit':
-                        controller.stop()
-                    else:
-                        return self.send_json(404, {'error': '操作不存在'})
-                return self.send_json(200, {'ok': True})
-            except emailer.EmailError as exc:
-                return self.send_json(400, {'error': str(exc)})
-            except (ValueError, TypeError, KeyError, OSError) as exc:
-                return self.send_json(400, {'error': str(exc)})
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    server.daemon_threads = True
-    return server

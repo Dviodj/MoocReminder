@@ -1,18 +1,13 @@
-import json
 import portal
 import tempfile
 import unittest
 import time
 from pathlib import Path
 from unittest.mock import patch
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-from threading import Thread
 
 import storage
 from storage import Store
-from portal import Controller, create_server, ASSETS
-from version import VERSION
+from portal import Controller
 from core import Assignment, now_beijing, BEIJING
 from datetime import datetime, timedelta
 
@@ -21,49 +16,16 @@ class PortalTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.controller = Controller(Store(self.temp.name), auto_scan=False)
-        self.server = create_server(self.controller)
-        self.thread = Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.base = f'http://127.0.0.1:{self.server.server_port}'
 
     def tearDown(self):
         self.controller.stop()
-        self.server.shutdown()
-        self.server.server_close()
         self.controller.worker.join(timeout=3)
         self.temp.cleanup()
 
-    def request(self, path, data=None, token=True):
-        headers = {'Authorization': 'Bearer ' + self.controller.token} if token else {}
-        if data is not None:
-            headers['Content-Type'] = 'application/json'
-        request = Request(self.base + path, data=json.dumps(data).encode() if data is not None else None, headers=headers)
-        with urlopen(request, timeout=3) as response:
-            return response.status, json.loads(response.read())
-
-    def test_private_state_rejects_missing_token(self):
-        with self.assertRaises(HTTPError) as error:
-            self.request('/api/state', token=False)
-        self.assertEqual(error.exception.code, 401)
-
-    def test_settings_and_pause_remain_responsive(self):
-        status, result = self.request('/api/pause', {'paused': True})
-        self.assertEqual(status, 200)
-        self.assertTrue(self.request('/api/state')[1]['paused'])
-        status, result = self.request('/api/settings', {'interval_minutes': 15, 'reminder_hours': [48, 12, 1]})
-        self.assertEqual(status, 200)
-        self.assertEqual(self.request('/api/state')[1]['settings']['interval_minutes'], 15)
-
     def test_invalid_settings_do_not_corrupt_saved_values(self):
-        with self.assertRaises(HTTPError):
-            self.request('/api/settings', {'interval_minutes': 0})
+        with self.assertRaises(ValueError):
+            self.controller.settings({'interval_minutes': 0})
         self.assertEqual(self.controller.store.data['settings']['interval_minutes'], 30)
-
-    def test_test_notification_reaches_frontend_without_blocking_api(self):
-        self.request('/api/test-notification', {})
-        notices = self.request('/api/state')[1]['notifications']
-        self.assertEqual(len(notices), 1)
-        self.assertTrue(notices[0]['test'])
 
     def test_qt_profile_schedules_a_fresh_check_on_restart(self):
         folder = Path(self.temp.name)
@@ -75,15 +37,6 @@ class PortalTests(unittest.TestCase):
         finally:
             resumed.stop()
             resumed.worker.join(timeout=3)
-
-    def test_served_page_shows_the_version_from_version_py(self):
-        with urlopen(self.base + '/', timeout=3) as response:
-            page = response.read().decode('utf-8')
-        self.assertIn(f'<b>{VERSION}</b>', page)
-        self.assertNotIn('{{VERSION}}', page)
-        raw = (ASSETS / 'index.html').read_text(encoding='utf-8')
-        self.assertIn('{{VERSION}}', raw)
-        self.assertNotIn('<b>v0.1</b>', raw)
 
     def test_failed_login_is_not_overwritten_by_late_ready(self):
         self.controller.busy = True
