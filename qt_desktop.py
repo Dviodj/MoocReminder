@@ -18,9 +18,10 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
-    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame)
+    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QTextBrowser)
 from portal import Controller
 import emailer
+import mail_guide
 import profiles as profiles_module
 from core import account_id, binding_state as core_binding_state
 from qt_reader import Manager
@@ -111,9 +112,12 @@ class EmailSettingsForm(QWidget):
         layout.addWidget(self.hint)
         state = QHBoxLayout()
         self.test_button = QPushButton('发送测试邮件')
+        self.guide_button = QPushButton('如何获取授权码？')
+        self.guide_button.setToolTip('以 QQ 邮箱为例，图文说明授权码与服务器怎么填')
         self.clear_password = QPushButton('清除已保存的授权码')
         self.clear_password.setVisible(self.saved_password)
         state.addWidget(self.test_button)
+        state.addWidget(self.guide_button)
         state.addWidget(self.clear_password)
         state.addStretch()
         layout.addLayout(state)
@@ -126,8 +130,37 @@ class EmailSettingsForm(QWidget):
         self.password.textEdited.connect(self.mark_password)
         self.clear_password.clicked.connect(self.forget)
         self.test_button.clicked.connect(self.request_test)
+        self.guide_button.clicked.connect(self.show_guide)
         self.advanced_toggle.toggled.connect(lambda _: self.autofill(self.recipient.text()))
         self.autofill(self.recipient.text())
+
+    def show_guide(self):
+        """Walk through getting a credential, for whoever sets the sender up."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('如何获取发件邮箱授权码')
+        # Tall enough that the troubleshooting section is visible without
+        # scrolling, but never taller than the screen it opens on.
+        screen = self.screen().availableGeometry() if self.screen() else None
+        height = min(900, int(screen.height() * 0.9)) if screen else 820
+        dialog.resize(680, height)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(mail_guide.guide_html(self.sender.text()))
+        layout.addWidget(browser)
+        buttons = QHBoxLayout()
+        provider = mail_guide.supports(self.sender.text())
+        if provider:
+            note = QLabel(f'已按 {provider["name"]} 显示步骤')
+        else:
+            note = QLabel('默认以 QQ 邮箱为例；填入其它邮箱后重开会显示对应步骤')
+        note.setObjectName('muted')
+        buttons.addWidget(note); buttons.addStretch()
+        close = QPushButton('知道了')
+        close.clicked.connect(dialog.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        dialog.exec()
 
     def mark_password(self, *_):
         self.password_touched = True
