@@ -12,8 +12,9 @@ MoocReminder/
 ├─ launch.vbs                           挑一个能加载 tkinter 的 python，拉起启动窗口（无控制台窗口）
 ├─ source_launcher.py                   启动器主体：选运行环境、校验依赖、建快捷方式、拉起主窗口
 ├─ launcher_ui.py                       Tk 启动窗口（阶段进度、取消、重试、日志入口）
-├─ desktop_shortcut.py                  创建 / 复用桌面快捷方式
-├─ qt_desktop.py                        PySide6 主窗口，桌面版真正的界面
+├─ desktop_shortcut.py                  快捷方式读写：桌面与「启动」文件夹共用，创建 / 复用 / 移动后自修复，只碰本程序自己的
+├─ autostart.py                         开机自启动：在「启动」文件夹里放置带 --background 的启动项
+├─ qt_desktop.py                        PySide6 主窗口，桌面版真正的界面（含托盘与单实例保护）
 ├─ portal.py                            界面状态机与提醒规则，向界面提供快照
 ├─ worker.py                            串行浏览器工作线程，界面通过队列通信
 ├─ browser.py                           读取编排：发现课程、逐门读取作业（必须由调用方提供内置浏览器）
@@ -23,12 +24,14 @@ MoocReminder/
 ├─ storage.py                           本地数据原子读写、损坏备份、账号隔离、邮件设置校验
 ├─ profiles.py                          账号档案：账号列表、当前账号、共用设置与按账号隔离的数据
 ├─ emailer.py                           邮件提醒：配置校验、邮件组装、SMTP 发送、发送队列（可扩展通道接口）
+├─ mail_log.py                          把内部发送记录键译成人能看懂的「时刻 / 类型 / 结果 / 说明」（无界面依赖）
+├─ mail_guide.py                        各服务商授权码获取步骤（图文教程内容，按发件邮箱域名选择）
 ├─ secrets_store.py                     邮箱授权码的本机加密（Windows DPAPI，缺失时明确标注回退）
 ├─ qt_bootstrap.py                      固定 Qt 的 TEMP/ICU，并设置 QtWebEngine 必需的沙箱与写入目录
 ├─ bundle_runtime.py                    构建便携运行包：内置 Python + Qt wheel（发布者用）
 ├─ package_source.py                    打出源码包 / 离线包 ZIP（发布者用）
 ├─ version.py                           产品名与版本号，界面与打包共用
-├─ requirements.txt                     开发环境依赖（含 Playwright、PyInstaller）
+├─ requirements.txt                     开发环境依赖（PySide6 与 QtWebEngine）
 ├─ requirements-runtime.txt             运行期依赖，随包版本校验用
 ├─ LICENSE                              本项目 MIT 许可证
 ├─ THIRD-PARTY-NOTICES.md               随包分发的第三方组件与许可证声明（发布包必带）
@@ -94,7 +97,7 @@ Qt 的库跨 wheel 分布，`QtWebEngineCore` 依赖只随 `PySide6-Addons` 分�
 
 ### 当前桌面版实际使用的模块
 
-`source_launcher.py` → `launcher_ui.py` → `qt_desktop.py` → `portal.py` → `worker.py` → `browser.py` → `site_scripts.py` + `qt_reader.py`，配套 `core.py`、`storage.py`、`profiles.py`、`qt_bootstrap.py`、`desktop_shortcut.py`、`version.py`。
+`source_launcher.py` → `launcher_ui.py` → `qt_desktop.py` → `portal.py` → `worker.py` → `browser.py` → `site_scripts.py` + `qt_reader.py`，配套 `core.py`、`storage.py`、`profiles.py`、`qt_bootstrap.py`、`desktop_shortcut.py`、`autostart.py`、`version.py`。
 
 `browser.py` 不再自带浏览器：它必须由调用方通过 `context_provider` 提供，桌面版注入的就是
 `qt_reader.py` 的 QtWebEngine 适配器。没有适配器时它会明确报错，而不是静默失败。
@@ -163,4 +166,4 @@ WebView2 Runtime）也随之不再需要。
 - 仓库根目录保持扁平，模块直接放在根目录；如需改成 `src/` 包结构，必须同步 `source_launcher.py`、`launch.vbs` 与打包脚本，并重跑启动实测。
 - 个人登录配置、作业缓存、浏览器配置按账号存在本机数据目录，绝不提交，也绝不进入发布包；`package_source.py` 会校验跟踪文件里不含这些路径。
 - **Qt 的库不能按“有没有 import”来裁剪**：库跨 wheel 分布，`QtWebEngineCore` 依赖只随 `PySide6-Addons` 分发的 DLL。`bundle_runtime.trim_qt()` 只删 `.pyd`/`.pyi`，`verify_qt()` 在打包时校验关键文件齐全。
-- 自动测试需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`；缺少 PySide6-WebEngine 或 Playwright 时，相关测试模块会导入失败，收集到的用例数会变少。这是环境未就绪，不是代码缺陷。
+- 自动测试需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`；缺少 PySide6-WebEngine 时，相关测试模块会导入失败，收集到的用例数会变少。这是环境未就绪，不是代码缺陷。

@@ -1,4 +1,4 @@
-# MoocReminder v0.2
+# MoocReminder v0.2.1
 
 把 MOOC 作业的截止时间集中起来，在忘记提交之前提醒你。
 
@@ -44,9 +44,9 @@
 
 ### 使用步骤
 
-1. 下载 **便携包**（解压完整文件夹）：v0.2 的便携包需先配置发件邮箱，尚未上传；在此之前请使用
+1. 下载 **便携包**（解压完整文件夹）：v0.2.1 的便携包需先配置发件邮箱，尚未上传；在此之前请使用
    [v0.1.2 便携包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.2/MoocReminder-v0.1.2-offline-x64.zip)
-   （压缩包约 248 MB，解压后约 669 MB），或使用 [v0.2 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2/MoocReminder-v0.2-source.zip) 自行安装依赖。
+   （压缩包约 248 MB，解压后约 669 MB），或使用 [v0.2.1 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.1/MoocReminder-v0.2.1-source.zip) 自行安装依赖。
 2. 双击 **启动MoocReminder.bat**，启动窗口会显示进度，随后弹出登录窗。
 3. 第一次使用点 **注册账号**，只填一个账号名称（例如「主账号」）即可进入。
 4. 进入后点 **绑定慕课与邮箱**，填入课程主页链接 `https://www.icourse163.org/home.htm?userId=你的数字账号#/home/course` 和接收提醒的邮箱。这两步完成前无法检查作业。
@@ -55,7 +55,15 @@
 
 账号、慕课绑定与邮箱设置只需做一次，之后每次打开只需在登录窗选择账号进入。
 
-最小化后仍会检查和提醒；关闭程序后停止监测，关机或休眠期间不会提醒。默认检查当前学期，历史学期可在设置中启用。
+程序**关掉窗口不会停止监测**：关闭按钮是最小化到系统托盘，提醒照常发出。要真正退出，请右键托盘图标选 **退出 MoocReminder**（也可以在那里临时暂停提醒）。关机或休眠期间不会提醒。默认检查当前学期，历史学期可在设置中启用。
+
+重复双击启动图标不会开出第二个程序：如果已经在运行（例如开机自启动已经在托盘里），会直接把那个窗口叫到前面——两个进程同时跑会把同一批提醒发两遍，所以程序只允许一个实例。
+
+### 开机自动启动
+
+开机自启动**默认关闭**，需要你自己同意：首次进入后总览页会出现一张提示卡询问一次，回答后不再打扰；之后随时可以在 **提醒设置** 里勾选或取消。
+
+开启后，登录 Windows 就会在系统托盘里静默运行（不弹窗）。启动项写在 Windows 的「启动」文件夹里，指向程序自身，因此**项目移动或改名后会自行修正**；如果那个位置已经有**其他程序的同名启动项**，程序绝不会覆盖或删除它。
 
 ### 账号
 
@@ -93,7 +101,7 @@
 
 官网未明确显示提交状态的条目会标为“请核对”。程序读取的是作业提交截止时间，互评截止时间不会列入提交提醒。
 
-需要较小的下载或进行开发时，也可使用 [v0.2 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2/MoocReminder-v0.2-source.zip)。源码包不含内置运行环境，需要机器上已有 64 位 Python 3.11–3.15，并由使用者自行安装依赖；便携包把这些都放在发布前完成。
+需要较小的下载或进行开发时，也可使用 [v0.2.1 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.1/MoocReminder-v0.2.1-source.zip)。源码包不含内置运行环境，需要机器上已有 64 位 Python 3.11–3.15，并由使用者自行安装依赖；便携包把这些都放在发布前完成。
 
 ## 本地数据与问题排查
 
@@ -127,7 +135,7 @@ python -m venv .venv
 
 开发环境约 760 MB（QtWebEngine 占大部分）。`test_site` 与 `test_qt_reader` 会真实渲染页面，请在有图形界面的 Windows 会话运行，不需要联网。
 
-当前开发状态为 **166 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。v0.1.1 发布时通过 83 项。
+当前开发状态为 **290 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。桌面快捷方式与开机自启动相关的测试需要 Windows 与 PowerShell。v0.1.1 发布时通过 83 项。
 
 发布者制作便携包：先运行 `python bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。`qt_login_click_check.py` 用于人工验证真实的“连接慕课”按钮。
 
