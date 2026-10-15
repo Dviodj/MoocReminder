@@ -8,7 +8,7 @@ import tempfile
 import sys
 import uuid
 
-from core import Assignment, DEFAULT_SETTINGS, account_id, binding_state, valid_home_url
+from core import Assignment, DEFAULT_SETTINGS, account_id, binding_state, now_beijing, valid_home_url
 import emailer
 import secrets_store
 
@@ -71,7 +71,7 @@ class Store:
         self.base_settings = deepcopy(settings_base) if settings_base else {}
         self.warning = ''
         self.data = dict(settings=deepcopy(DEFAULT_SETTINGS), assignments=[], reminders={}, completed=[],
-                         courses=[], last_scan='', errors=[], successful_urls=[], email_log={})
+                         courses=[], last_scan='', errors=[], successful_urls=[], email_log={}, digest_state={})
         if self.path.exists():
             try:
                 saved = json.loads(self.path.read_text(encoding='utf-8'))
@@ -88,6 +88,7 @@ class Store:
                     any(not isinstance(h, (int, float)) or not 0 < h <= 8760 for h in settings['reminder_hours']) or
                     not isinstance(settings['manual_urls'], list) or any(not isinstance(u, str) for u in settings['manual_urls']) or
                     not isinstance(candidate['completed'], list) or not isinstance(candidate['reminders'], dict) or
+                    not isinstance(candidate.get('digest_state', {}), dict) or
                     not isinstance(candidate['courses'], list) or not isinstance(candidate['errors'], list)):
                     raise ValueError('本地设置格式无效')
                 normalize_email_settings({'email': candidate['settings'].get('email', {})})
@@ -166,6 +167,12 @@ class Store:
         if len(log) > 500:
             log = dict(sorted(log.items(), key=lambda pair: str(pair[1]))[-500:])
         self.data['email_log'] = log
+        # "This summary was already handled today" marks are only useful for the
+        # current day, and one is written per configured time, so they would
+        # otherwise pile up forever. Their key is `due|digest|<date>|<time>`.
+        today = now_beijing().strftime('%Y-%m-%d')
+        self.data['digest_state'] = {key: value for key, value in self.data.get('digest_state', {}).items()
+                                     if key.split('|')[2:3] == [today]}
 
     def update_settings(self, settings):
         """Merge a settings patch; only a changed MOOC account clears the cache."""
@@ -176,8 +183,10 @@ class Store:
             # The stored tasks and marks belong to the previous MOOC account.
             self.data.update(assignments=[], reminders={}, completed=[], courses=[], last_scan='', errors=[], successful_urls=[])
         if current.get('email', {}).get('recipient') != merged.get('email', {}).get('recipient'):
-            # A new recipient deserves a fresh set of reminders.
+            # A new recipient deserves a fresh set of reminders, including the
+            # daily summary that may already have gone to the old address.
             self.data['email_log'] = {}
+            self.data['digest_state'] = {}
         self.data['settings'] = merged
         self.save()
         return changed_account

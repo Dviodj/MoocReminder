@@ -10,7 +10,8 @@ import threading
 import time
 import uuid
 
-from core import now_beijing, due_reminders, due_digests, remaining_text, account_id, valid_home_url, normalize_course_url
+from core import (now_beijing, due_reminders, due_digests, remaining_text, account_id,
+                  normalize_home_url, home_url_problem, course_url_problem)
 from storage import normalize_email_settings
 from version import VERSION
 from worker import BrowserWorker
@@ -152,7 +153,7 @@ class Controller:
                     self.add_notification(alerts)
                     self.store.data['reminders'] = state
                 digest_due = due_digests(self.store.data['settings']['email'].get('digest_times'),
-                                         self.store.data['email_log'], now_beijing())
+                                         self.store.data.setdefault('digest_state', {}), now_beijing())
                 self.dispatch_email(alerts, digest_due, active)
                 self.store.save()
                 profile_exists = (self.store.folder / self.profile_dir / account_id(self.store.data['settings']['home_url'])).exists()
@@ -170,15 +171,33 @@ class Controller:
     def record_email(self, key, ok, detail):
         with self.lock:
             attempts = int(self.store.data['email_log'].get('attempt|' + key, '0') or 0)
-            self.store.data['email_log'][key] = ('sent ' if ok else 'failed ') + now_beijing().isoformat(timespec='seconds')
+            # The reason is kept next to the result so the send log can explain
+            # a failure instead of only showing that one happened.
+            note = ' '.join(str(detail or '').split())[:160]
+            self.store.data['email_log'][key] = (('sent ' if ok else 'failed ')
+                + now_beijing().isoformat(timespec='seconds') + (f' · {note}' if note else ''))
             if not ok:
                 self.store.data['email_log']['attempt|' + key] = str(attempts + 1)
                 self.email_message = detail or '邮件发送失败，请查看连接详情。'
             else:
                 self.store.data['email_log'].pop('attempt|' + key, None)
-            revision = key.split('|')[1] if key.startswith('alert|') else None
-            self.store.prune_email_log({revision} if revision else None)
+            # Only the size cap applies here. Passing this one revision would
+            # delete the history of every other task's reminders, which is what
+            # `merge_scan` may do but only with the full set of live revisions.
+            self.store.prune_email_log()
             self.store.save()
+
+    @staticmethod
+    def _mail_settled(log, key):
+        """Whether this key is done with: already sent, or out of attempts.
+
+        A plain `key in log` check counted a *failed* send as settled, so the
+        recorded attempt counter never got a chance to retry and one transient
+        SMTP error lost the reminder for good.
+        """
+        if str(log.get(key, '')).startswith('sent '):
+            return True
+        return int(log.get('attempt|' + key, '0') or 0) >= 3
 
     def dispatch_email(self, alerts, digest_due, active):
         """Queue the emails that this tick makes due; never blocks on delivery."""
@@ -190,12 +209,12 @@ class Controller:
         for window in sorted({window for _, window in alerts or []}):
             group = [item for item, item_window in alerts or [] if item_window == window]
             key = f'alert|{group[0].revision}|{window}'
-            if key in log or int(log.get('attempt|' + key, '0') or 0) >= 3:
+            if self._mail_settled(log, key):
                 continue
             queued = self.mailer.enqueue(key, deepcopy(config), emailer.compose_alert(group, window, now_beijing())) or queued
         for stamp in digest_due or []:
             key = f'digest|{now_beijing().strftime("%Y-%m-%d")}|{stamp}'
-            if key in log or int(log.get('attempt|' + key, '0') or 0) >= 3:
+            if self._mail_settled(log, key):
                 continue
             pending = [item for item in active if not item.deadline or item.deadline > now_beijing()]
             if not pending:
@@ -256,32 +275,56 @@ class Controller:
                 email_log=deepcopy(self.store.data['email_log']), email_status=self.email_message)
 
     def settings(self, patch):
+        """Apply a settings patch and report what could not be used.
+
+        Returns a list of warnings (empty when everything applied). Only a hard
+        problem in the account fields raises; a mail account that is not ready
+        yet must not throw away the rest of the patch, because the user pastes
+        the course link and the mailbox in the same dialog.
+        """
         with self.lock:
             settings = {**self.store.data['settings'], **patch}
-            if not isinstance(settings['home_url'], str) or not valid_home_url(settings['home_url']):
-                raise ValueError('课程主页链接需要包含你的 userId。')
+            home_url = normalize_home_url(settings['home_url'])
+            if not home_url:
+                raise ValueError(home_url_problem(settings['home_url']))
+            settings['home_url'] = home_url
             if not isinstance(settings['interval_minutes'], int) or not 5 <= settings['interval_minutes'] <= 1440:
                 raise ValueError('检查间隔请填写 5–1440 分钟。')
             if not isinstance(settings['reminder_hours'], list) or not settings['reminder_hours'] or any(not isinstance(h, (int, float)) or not 0 < h <= 8760 for h in settings['reminder_hours']):
                 raise ValueError('请填写有效的提前提醒小时数。')
-            if not isinstance(settings['manual_urls'], list) or any(not isinstance(u, str) or not normalize_course_url(u) for u in settings['manual_urls']):
-                raise ValueError('作业链接需要来自慕课官网，并包含学期 tid。')
+            if not isinstance(settings['manual_urls'], list):
+                raise ValueError('补充作业链接格式不正确。')
+            for url in settings['manual_urls']:
+                problem = course_url_problem(url) if isinstance(url, str) else '补充作业链接需要是文字。'
+                if problem:
+                    raise ValueError(problem)
+            settings['manual_urls'] = [normalize_course_url(u) for u in settings['manual_urls']]
             if not all(isinstance(settings[k], bool) for k in ['include_quizzes', 'include_finished']):
                 raise ValueError('提醒选项无效。')
-            email = normalize_email_settings({'email': patch.get('email', settings.get('email', {}))}, settings.get('email'))
+            # The password the user already saved has to come from storage, not
+            # from the merged patch: the form omits it whenever the user did not
+            # retype it, and reading the merged value would wipe the saved code.
+            stored = self.store.data['settings'].get('email') or {}
+            incoming = patch.get('email')
+            email = normalize_email_settings({'email': stored if incoming is None else incoming}, stored)
+            warnings = []
             if email['enabled']:
                 try:
                     # The shipped sender settings fill in whatever the user left blank.
                     emailer.validate(email, emailer.resolve_password(email, Path(__file__).parent),
                                      Path(__file__).parent)
                 except emailer.EmailError as exc:
-                    raise ValueError(str(exc)) from exc
+                    # Keep what the user typed so it can be corrected, but never
+                    # leave a reminder switched on that cannot be delivered.
+                    email['enabled'] = False
+                    warnings.append(f'邮件提醒尚未生效：{exc}')
             settings = {**settings, 'email': email}
             changed = self.store.update_settings(settings)
             self.next_scan = time.monotonic() + self.interval()
             if changed:
                 self.connected = False
                 self.phase = '已切换账号，请重新连接慕课。'
+            return warnings
 
     def stop(self):
         self.stopping = True

@@ -9,7 +9,8 @@ from pathlib import Path
 import re
 import time
 
-from core import Course, normalize_course_url, parse_assignment, valid_home_url, account_id
+from core import (Course, normalize_course_url, parse_assignment, valid_home_url,
+                  normalize_home_url, home_url_problem, account_id)
 from site_scripts import ASSIGNMENTS_SCRIPT, HOME_CARDS_SCRIPT, CATEGORIES_SCRIPT, ACCOUNT_SCRIPT, classify_assignment_page
 
 
@@ -36,21 +37,61 @@ def _is_empty(data):
 # user cannot accidentally hand over unrelated sessions.
 MOOC_COOKIE_NAMES = ('NTESSTUDYSI', 'STUDY_SESS', 'STUDY_INFO', 'EDUWEBDEVICE', 'P_INFO',
                      'NTES_SESS', 'S_INFO', 'STUDY_PERSIST')
+_BY_UPPER = {name.upper(): name for name in MOOC_COOKIE_NAMES}
+
+
+def cookie_fields(pasted):
+    """The `name=value` fields in whatever shape the user pasted.
+
+    A Cookie header is only one of the things people copy: a cURL command, the
+    developer tools' cookie table (tab separated, one cookie per line) and a
+    plain list of name/value lines all turn up, and every one of them used to
+    parse to nothing with no explanation.
+    """
+    text = str(pasted or '')
+    if not text.strip():
+        return []
+    curl = re.search(r'-H\s*[\'"]Cookie:\s*(.*?)[\'"]', text, re.IGNORECASE | re.DOTALL)
+    if curl:
+        text = curl.group(1)
+    else:
+        text = re.sub(r'^\s*Cookie:\s*', '', text.strip(), flags=re.IGNORECASE)
+    fields = []
+    for line in re.split(r'[\r\n]+', text):
+        line = line.strip()
+        if not line:
+            continue
+        columns = [column.strip() for column in line.split('\t') if column.strip()]
+        # The devtools cookie table has no '=' in its first two columns.
+        if len(columns) >= 2 and '=' not in columns[0]:
+            fields.append(f'{columns[0]}={columns[1]}')
+            continue
+        fields.extend(part.strip() for part in line.split(';'))
+    return [field for field in fields if field]
+
+
+def cookie_names_found(pasted):
+    """Every cookie name in the paste, so a rejection can say what it saw."""
+    names = []
+    for field in cookie_fields(pasted):
+        name = field.partition('=')[0].strip().strip('"')
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def parse_cookie_header(pasted):
     """Read a Cookie header copied from a browser into (name, value, domain)."""
     pairs = []
-    for chunk in re.split(r'[;\n\r]+', str(pasted or '')):
-        chunk = chunk.strip()
-        if not chunk or '=' not in chunk:
+    for field in cookie_fields(pasted):
+        if '=' not in field:
             continue
-        name, _, value = chunk.partition('=')
-        name, value = name.strip(), value.strip().strip('"')
-        if not name or not value:
+        name, _, value = field.partition('=')
+        name, value = name.strip().strip('"'), value.strip().strip('"')
+        canonical = _BY_UPPER.get(name.upper(), '')
+        if not canonical or not value or any(canonical == seen for seen, _, _ in pairs):
             continue
-        if name in MOOC_COOKIE_NAMES:
-            pairs.append((name, value, '.icourse163.org'))
+        pairs.append((canonical, value, '.icourse163.org'))
     return pairs
 
 
@@ -83,8 +124,9 @@ class MoocBrowser:
         return self.context
 
     def login(self, home_url):
-        if not valid_home_url(home_url):
-            raise ValueError('课程主页须是慕课官网 /home.htm?userId=数字')
+        problem = home_url_problem(home_url)
+        if problem:
+            raise ValueError(problem)
         context = self.ensure(headless=False, user_id=account_id(home_url))
         # Startup tabs can be replaced by Edge; use a page we create and own.
         page = context.new_page()
@@ -99,10 +141,18 @@ class MoocBrowser:
         a login. The pasted session is verified against the MOOC site, so a bad
         or expired paste is reported instead of silently producing no data.
         """
-        if not valid_home_url(home_url):
-            raise ValueError('课程主页须是慕课官网 /home.htm?userId=数字')
+        problem = home_url_problem(home_url)
+        if problem:
+            raise ValueError(problem)
         cookies = parse_cookie_header(pasted)
         if not cookies:
+            found = cookie_names_found(pasted)
+            if found:
+                # Name what was actually there: without this the user only sees
+                # "no cookies found" and cannot tell what to copy instead.
+                raise ValueError('粘贴的内容里没有慕课登录 Cookie（读到的是：' + '、'.join(found[:8])
+                                 + '）。请在已登录慕课的浏览器里按 F12 → 网络（Network）→ 刷新 → '
+                                   '点第一个请求 → 复制“Cookie”请求头的全部内容。')
             raise ValueError('没有解析出任何 Cookie。请从浏览器开发者工具复制 Cookie 请求头。')
         context = self.ensure(headless=True, user_id=account_id(home_url))
         context.apply_cookies(cookies)

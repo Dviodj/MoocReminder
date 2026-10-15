@@ -1,17 +1,20 @@
 import json
+import portal
 import tempfile
 import unittest
 import time
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from threading import Thread
 
+import storage
 from storage import Store
 from portal import Controller, create_server, ASSETS
 from version import VERSION
-from core import Assignment, now_beijing
-from datetime import timedelta
+from core import Assignment, now_beijing, BEIJING
+from datetime import datetime, timedelta
 
 
 class PortalTests(unittest.TestCase):
@@ -182,6 +185,129 @@ class EmailSchedulingTests(unittest.TestCase):
         self.controller.store.data['assignments'] = [item.to_dict()]
         return item
 
+    def add_assignment_at(self, deadline, uid='u1', name='第三章作业'):
+        """Store a pending task with an explicit deadline, for a pinned clock."""
+        item = Assignment(uid=uid, course='高等数学', course_url='https://www.icourse163.org/learn/X-1?tid=1#/learn/testlist',
+                          name=name, kind='作业', deadline=deadline, deadline_text='',
+                          status='pending', checked_at=deadline.isoformat())
+        self.controller.store.data['assignments'] = [item.to_dict()]
+        return item
+
+    def test_the_daily_summary_actually_leaves_the_queue(self):
+        """End to end: the due mark must not collide with the send log.
+
+        `due_digests` recorded `digest|<date>|<time>` in the very dict the send
+        log uses, so `dispatch_email` saw the key as already sent and dropped
+        every daily summary. The user set a time and never received anything.
+        """
+        moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.assertIn('digest|2026-02-14|08:00', [key for key, _, _ in self.mailer.queued])
+
+    def test_a_missed_digest_time_is_delivered_later_that_day(self):
+        """Opening the program after the chosen time still sends that day's mail."""
+        late = datetime(2026, 2, 14, 9, 30, 0, tzinfo=BEIJING)
+        self.add_assignment_at(late + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: late):
+            self.controller.tick()
+        self.assertIn('digest|2026-02-14|08:00', [key for key, _, _ in self.mailer.queued])
+
+    def test_a_time_later_today_is_not_sent_early(self):
+        moment = datetime(2026, 2, 14, 7, 0, 0, tzinfo=BEIJING)
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.assertEqual(self.mailer.queued, [])
+
+    def test_one_summary_per_time_per_day(self):
+        moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+            self.controller.tick()
+        self.assertEqual([key for key, _, _ in self.mailer.queued], ['digest|2026-02-14|08:00'])
+
+    def test_the_next_day_the_summary_is_due_again(self):
+        first = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
+        second = datetime(2026, 2, 15, 8, 0, 30, tzinfo=BEIJING)
+        self.add_assignment_at(second + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: first):
+            self.controller.tick()
+        with patch.object(portal, 'now_beijing', lambda: second):
+            self.controller.tick()
+        self.assertEqual([key for key, _, _ in self.mailer.queued],
+                         ['digest|2026-02-14|08:00', 'digest|2026-02-15|08:00'])
+
+    def test_recording_one_reminder_keeps_the_others_in_the_history(self):
+        """The send log is a history, so one send must not erase the rest.
+
+        `record_email` used to prune with just its own revision, which deleted
+        every other task's entries the moment a new reminder went out.
+        """
+        first = self.add_assignment(uid='u1', name='第三章作业')
+        second = self.add_assignment(uid='u2', name='第四章作业')
+        self.controller.record_email(f'alert|{first.revision}|24', True, '')
+        self.controller.record_email(f'alert|{second.revision}|24', True, '')
+        log = self.controller.store.data['email_log']
+        self.assertIn(f'alert|{first.revision}|24', log)
+        self.assertIn(f'alert|{second.revision}|24', log)
+
+    def test_entries_for_vanished_tasks_are_still_dropped_by_a_scan(self):
+        first = self.add_assignment(uid='u1', name='第三章作业')
+        self.controller.record_email(f'alert|{first.revision}|24', True, '')
+        # The course page answered but no longer lists this task.
+        self.controller.store.merge_scan([], [first.course_url])
+        self.assertEqual({}, self.controller.store.data['email_log'])
+
+    def test_the_due_mark_is_kept_out_of_the_send_log(self):
+        """The mark is bookkeeping; the user-facing history must not show it."""
+        moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        marks = self.controller.store.data['digest_state']
+        self.assertEqual({'due|digest|2026-02-14|08:00': '2026-02-14'}, marks)
+        self.assertEqual({}, {key: value for key, value in self.controller.store.data['email_log'].items()
+                              if key.startswith('due|')})
+
+    def test_yesterdays_due_marks_are_dropped(self):
+        self.enable_email(digest_times=['08:00'])
+        self.controller.store.data['digest_state'] = {
+            'due|digest|2026-02-13|08:00': '2026-02-13',
+            'due|digest|2026-02-14|08:00': '2026-02-14',
+        }
+        # `storage` imports the clock by name, so that is the one to pin.
+        with patch.object(storage, 'now_beijing', lambda: datetime(2026, 2, 14, 9, 0, 0, tzinfo=BEIJING)):
+            self.controller.store.prune_email_log()
+        self.assertEqual({'due|digest|2026-02-14|08:00': '2026-02-14'}, self.controller.store.data['digest_state'])
+
+    def test_a_new_recipient_gets_todays_summary_again(self):
+        moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'])
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.enable_email(recipient='other@163.com', digest_times=['08:00'])
+        self.assertEqual({}, self.controller.store.data['digest_state'])
+
+    def test_a_failed_alert_is_retried_up_to_three_times(self):
+        """A recorded failure must not look like a settled send."""
+        item = self.add_assignment()
+        key = f'alert|{item.revision}|24'
+        self.controller.record_email(key, False, '临时网络错误')
+        self.assertTrue(self.controller.dispatch_email([(item, 24)], [], self.controller.store.active_items()))
+        self.controller.record_email(key, False, '')
+        self.controller.record_email(key, False, '')
+        self.assertFalse(self.controller.dispatch_email([(item, 24)], [], self.controller.store.active_items()))
+
     def test_due_reminder_queues_one_email_without_a_popup_duplicate(self):
         item = self.add_assignment(hours=20)
         alerts = [(item, 24)]
@@ -224,13 +350,54 @@ class EmailSchedulingTests(unittest.TestCase):
         self.assertIn('sent', self.controller.store.data['email_log']['alert|u1|24'])
         self.assertNotIn('attempt|alert|u1|24', self.controller.store.data['email_log'])
 
+    def test_a_mail_account_that_is_not_ready_warns_without_discarding_the_patch(self):
+        """A half-configured mailbox must not throw away the rest of the patch.
+
+        The binding dialog saves the pasted course link and the mailbox together,
+        so refusing the whole patch over a missing authorization code made the
+        course link look like it could never be saved.
+        """
+        warnings = self.controller.settings({'email': dict(enabled=True, recipient='bad-address', server='smtp.qq.com', password='x')})
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('邮件提醒尚未生效', warnings[0])
+        # Kept for correction, but never left switched on while unusable.
+        self.assertEqual(self.controller.store.data['settings']['email']['recipient'], 'bad-address')
+        self.assertFalse(self.controller.store.data['settings']['email']['enabled'])
+
     def test_invalid_email_settings_are_rejected_without_saving(self):
         before = self.controller.store.data['settings']['email']['recipient']
         with self.assertRaises(ValueError):
-            self.controller.settings({'email': dict(enabled=True, recipient='bad-address', server='smtp.qq.com', password='x')})
-        with self.assertRaises(ValueError):
             self.controller.settings({'email': dict(enabled=True, recipient='me@qq.com', digest_times=['25:00'])})
         self.assertEqual(self.controller.store.data['settings']['email']['recipient'], before)
+
+    def test_saving_again_keeps_the_stored_authorization_code(self):
+        """The form omits the password when the user did not retype it.
+
+        Reading `current` from the merged patch instead of from storage made the
+        second save look like a missing authorization code, so the user had to
+        re-enter it after every unrelated change.
+        """
+        self.enable_email(advanced=True, sender='me@qq.com', password='16-char-code')
+        saved = self.controller.store.data['settings']['email']['password']
+        self.assertTrue(saved.startswith('dpapi:') or saved.startswith('plain:'))
+
+        # The dialog's own payload shape: no password key at all.
+        form = {key: value for key, value in self.controller.email_config().items() if key != 'password'}
+        form['digest_times'] = ['08:00']
+        warnings = self.controller.settings({'email': form})
+        self.assertEqual(warnings, [])
+        stored = self.controller.store.data['settings']['email']
+        self.assertEqual(stored['password'], saved)
+        self.assertTrue(stored['enabled'])
+        self.assertEqual(stored['digest_times'], ['08:00'])
+
+    def test_tidying_unrelated_settings_keeps_the_course_link_and_the_mailbox(self):
+        """Pasting the course link must save even with a mailbox that needs work."""
+        self.controller.settings({'email': dict(enabled=True, recipient='', server='', password='')})
+        home = 'https://www.icourse163.org/home.htm?userId=8123456789#/home/course'
+        warnings = self.controller.settings({'home_url': home})
+        self.assertTrue(warnings or not self.controller.store.is_bound())
+        self.assertEqual(self.controller.store.data['settings']['home_url'], home)
 
     def test_test_email_requires_an_enabled_recipient(self):
         with self.assertRaises(ValueError):
