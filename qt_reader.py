@@ -145,6 +145,32 @@ class Manager(QObject):
             request.finish(context)
         return self.bridge.call(create, cancelled=cancelled)
 
+    def shutdown(self):
+        """Release every browser context.
+
+        Called on the UI thread when the app is closing.  It must run through
+        the bridge like any other browser call, because profiles and pages
+        belong to the browser thread, and it must never raise: a failure here
+        would stop the window from closing.
+        """
+        def release(request):
+            closed, errors = [], []
+            for user_id, context in list(self.contexts.items()):
+                try:
+                    context.close()
+                    closed.append(user_id)
+                except Exception as exc:
+                    errors.append(f'{user_id}: {exc}')
+            self.contexts.clear()
+            request.finish(dict(closed=closed, errors=errors))
+        try:
+            result = self.bridge.call(release, timeout=10)
+        except Exception as exc:
+            self.record('manager_shutdown_failed', error=str(exc))
+            return dict(closed=[], errors=[str(exc)])
+        self.record('manager_shutdown', **result)
+        return result
+
 
 class Context:
     def __init__(self, manager, profile, cancelled):

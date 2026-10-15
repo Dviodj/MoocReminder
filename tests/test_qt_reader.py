@@ -91,6 +91,38 @@ class QtReaderTests(unittest.TestCase):
             page.goto('https://www.icourse163.org/', wait_until='commit', timeout=100)
         self.assertIn('18', errors[-1])
 
+    def test_manager_exposes_shutdown_and_closes_every_context(self):
+        """The window calls this while quitting.
+
+        It went missing when the WebView2 reader was replaced, and the
+        resulting AttributeError stopped QApplication.quit() from ever
+        running, so closing the window left the process alive.
+        """
+        from qt_reader import Manager
+        manager = Manager(Path(__file__).resolve().parents[1] / 'qt-test-data' / 'manager')
+        self.assertTrue(hasattr(manager, 'shutdown'))
+        closed = []
+        manager.contexts['user-1'] = SimpleNamespace(close=lambda: closed.append('user-1'))
+        manager.contexts['user-2'] = SimpleNamespace(close=lambda: closed.append('user-2'))
+        manager.bridge = ImmediateBridge()
+        result = manager.shutdown()
+        self.assertEqual(sorted(closed), ['user-1', 'user-2'])
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(manager.contexts, {})
+
+    def test_shutdown_reports_a_failing_context_instead_of_raising(self):
+        from qt_reader import Manager
+        manager = Manager(Path(__file__).resolve().parents[1] / 'qt-test-data' / 'manager')
+        def explode():
+            raise RuntimeError('页面已失效')
+        manager.contexts['user-1'] = SimpleNamespace(close=explode)
+        manager.bridge = ImmediateBridge()
+        result = manager.shutdown()
+        self.assertEqual(result['closed'], [])
+        self.assertEqual(len(result['errors']), 1)
+        self.assertIn('页面已失效', result['errors'][0])
+        self.assertEqual(manager.contexts, {})
+
 
 if __name__ == '__main__':
     unittest.main()
