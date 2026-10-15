@@ -3,6 +3,7 @@ import gc
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -22,7 +23,7 @@ for _name, _value in _saved_temp.items():
         os.environ[_name] = _value
 
 from PySide6.QtWidgets import QApplication
-from qt_desktop import Window, EmailSettingsForm, LockScreen, RegisterDialog
+from qt_desktop import Window, EmailSettingsForm, EmailLogPage, LockScreen, RegisterDialog
 from core import Course, COURSE_URL, parse_assignment, BEIJING
 from datetime import datetime
 from storage import Store
@@ -43,7 +44,7 @@ class QtGuiTests(unittest.TestCase):
             second = parse_assignment(dict(name='第2章作业', deadline='2026-10-18 23:45', status='未提交'), course)
             store.merge_scan([first], [COURSE_URL])
             with patch('portal.now_beijing', return_value=datetime(2026,10,13,12,tzinfo=BEIJING)):
-                window = Window(store)
+                window = Window(store, tray=False)
                 try:
                     self.assertEqual(window.table.item(0,3).text(), '10月18日 23:30')
                     self.assertEqual(window.table.item(0,5).text(), '请核对')
@@ -145,7 +146,7 @@ class EmailSettingsFormTests(unittest.TestCase):
 
     def test_window_reports_the_delivery_result_in_the_dialog(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
-            window = Window(Store(folder))
+            window = Window(Store(folder), tray=False)
             try:
                 form = self.make(password=secrets_store.encrypt('授权码'))
                 with patch.object(window.controller, 'send_test_email', return_value=True):
@@ -248,7 +249,7 @@ class AccountUiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.profiles = profiles_module.Profiles(self.temp.name)
-        self.window = Window(self.profiles.load_store(), profiles=self.profiles)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
 
     def tearDown(self):
         self.window.controller.stop()
@@ -311,6 +312,303 @@ class AccountUiTests(unittest.TestCase):
         current = self.window.current_account_key()
         self.window.switch_account(current)
         self.assertIs(self.window.controller.worker, worker)
+
+
+class PageSwitchTests(unittest.TestCase):
+    """The side bar switches between real pages; it used to redraw one view."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.window = Window(Store(self.temp.name), tray=False)
+
+    def tearDown(self):
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+        gc.collect()
+        self.temp.cleanup()
+
+    def test_every_nav_entry_has_a_page_of_its_own(self):
+        self.assertEqual(len(self.window.page_index), self.window.pages.count())
+        for key in ('overview', 'assignments', 'courses', 'log', 'details'):
+            self.assertIn(key, self.window.page_index)
+            self.assertIn(key, self.window.nav_buttons)
+
+    def test_the_settings_entry_is_a_dialog_and_not_a_page(self):
+        self.assertIn('settings', self.window.nav_buttons)
+        self.assertNotIn('settings', self.window.page_index)
+
+    def test_the_workspace_opens_on_the_overview(self):
+        self.assertEqual('overview', self.window.current_page())
+        self.assertTrue(self.window.nav_buttons['overview'].property('active'))
+
+    def test_clicking_an_entry_changes_the_visible_page(self):
+        self.window.nav_buttons['assignments'].click()
+        self.assertEqual('assignments', self.window.current_page())
+        self.assertEqual(self.window.page_index['assignments'], self.window.pages.currentIndex())
+
+    def test_the_active_entry_follows_the_click(self):
+        self.window.nav_buttons['courses'].click()
+        self.assertTrue(self.window.nav_buttons['courses'].property('active'))
+        self.assertFalse(self.window.nav_buttons['overview'].property('active'))
+
+    def test_going_back_to_the_overview_works_even_when_nothing_changed(self):
+        """This was the reported bug: two entries redrew the same view."""
+        self.window.nav_buttons['assignments'].click()
+        self.window.nav_buttons['overview'].click()
+        self.assertEqual('overview', self.window.current_page())
+
+    def test_the_header_describes_the_page_it_shows(self):
+        self.window.show_page('log')
+        self.assertIn('邮件', self.window.page_title.text())
+        self.assertTrue(self.window.page_subtitle.text())
+
+    def test_the_binding_shortcut_still_reaches_its_page(self):
+        self.window.show_courses()
+        self.assertEqual('courses', self.window.current_page())
+        self.window.details()
+        self.assertEqual('details', self.window.current_page())
+
+    def test_each_page_can_be_shown_without_an_error(self):
+        for key in self.window.page_index:
+            self.window.show_page(key)
+            self.assertEqual(self.window.page_index[key], self.window.pages.currentIndex())
+
+
+class EmailLogPageTests(unittest.TestCase):
+    """The send history the user asked to be able to see."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def page(self):
+        widget = EmailLogPage()
+        self.widgets.append(widget)
+        return widget
+
+    def setUp(self):
+        self.widgets = []
+
+    def tearDown(self):
+        for widget in self.widgets:
+            widget.close()
+            widget.deleteLater()
+        self.widgets = []
+        self.app.processEvents()
+        gc.collect()
+
+    def test_an_empty_history_says_so_and_shows_no_rows(self):
+        page = self.page()
+        self.assertEqual(0, page.table.rowCount())
+        self.assertTrue(page.empty.isVisibleTo(page))
+
+    def test_rows_are_filled_newest_first(self):
+        page = self.page()
+        page.set_log({
+            'alert|abc|24.0': 'sent 2026-02-14T08:00:00+08:00',
+            'digest|2026-02-15|08:00': 'sent 2026-02-15T08:00:00+08:00',
+        })
+        self.assertEqual(2, page.table.rowCount())
+        self.assertEqual('每日汇总', page.table.item(0, 1).text())
+        self.assertEqual('02月15日 08:00', page.table.item(0, 0).text())
+        self.assertEqual('已发送', page.table.item(0, 2).text())
+        self.assertFalse(page.empty.isVisibleTo(page))
+
+    def test_a_failure_shows_its_reason(self):
+        page = self.page()
+        page.set_log({'alert|abc|24.0': 'failed 2026-02-14T08:00:00+08:00 · 授权码不正确'})
+        self.assertEqual('发送失败', page.table.item(0, 2).text())
+        self.assertIn('授权码不正确', page.table.item(0, 3).text())
+        self.assertIn('提前 24 小时', page.table.item(0, 3).text())
+
+    def test_the_heading_counts_real_messages_and_ignores_test_ones(self):
+        page = self.page()
+        page.set_log({
+            'alert|abc|24.0': 'sent 2026-02-14T08:00:00+08:00',
+            'digest|2026-02-15|08:00': 'failed 2026-02-15T08:00:00+08:00',
+            'test|9f2c': 'sent 2026-02-15T09:00:00+08:00',
+        })
+        self.assertIn('共 2 条', page.hint.text())
+        self.assertIn('1 条发送失败', page.hint.text())
+
+    def test_the_last_delivery_result_is_shown_below_the_table(self):
+        page = self.page()
+        page.set_log({}, '邮件已发送：测试')
+        self.assertIn('邮件已发送', page.status.text())
+
+    def test_a_missing_log_is_rendered_as_empty(self):
+        page = self.page()
+        page.set_log()
+        self.assertEqual(0, page.table.rowCount())
+
+
+class FakeTray:
+    """Stands in for the notification-area icon, which no test machine has."""
+
+    def __init__(self):
+        self.messages = []
+        self.pause_checked = False
+
+    def showMessage(self, title, message, icon=None, timeout=0):
+        self.messages.append((title, message))
+
+    def show_window(self):
+        self.shown = getattr(self, 'shown', 0) + 1
+
+    def sync(self, snapshot):
+        self.last_snapshot = snapshot
+
+
+class AutostartUiTests(unittest.TestCase):
+    """Autostart is offered once, and closing the window must not stop reminders."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.profiles = profiles_module.Profiles(self.temp.name)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+
+    def tearDown(self):
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.temp.cleanup()
+
+    def test_the_prompt_is_shown_until_it_is_answered(self):
+        self.assertTrue(self.window.autostart.isVisibleTo(self.window))
+        self.window.decline_autostart()
+        self.assertFalse(self.window.autostart.isVisibleTo(self.window))
+        self.assertTrue(self.profiles.shared['autostart_prompted'])
+
+    def test_answering_the_prompt_survives_a_restart(self):
+        self.window.decline_autostart()
+        reopened = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+        try:
+            self.assertFalse(reopened.autostart.isVisibleTo(reopened))
+        finally:
+            reopened.controller.stop()
+            reopened.controller.worker.join(timeout=2)
+            reopened.close()
+
+    def test_accepting_installs_the_entry_and_answers_the_prompt(self):
+        with patch('qt_desktop.autostart.enable') as enable, \
+             patch('qt_desktop.autostart.enabled', return_value=True):
+            self.window.accept_autostart()
+        self.assertEqual(1, enable.call_count)
+        self.assertTrue(enable.call_args.kwargs.get('python'))
+        self.assertTrue(self.window.autostart_on)
+        self.assertFalse(self.window.autostart.isVisibleTo(self.window))
+        self.assertTrue(self.profiles.shared['autostart_prompted'])
+
+    def test_declining_installs_nothing(self):
+        with patch('qt_desktop.autostart.enable') as enable:
+            self.window.decline_autostart()
+        self.assertFalse(enable.called)
+
+    def test_a_failure_to_install_is_reported_rather_than_hidden(self):
+        with patch('qt_desktop.autostart.enable', side_effect=RuntimeError('同名开机启动项不属于本程序，未覆盖。')), \
+             patch('qt_desktop.autostart.enabled', return_value=False), \
+             patch('qt_desktop.QMessageBox.warning') as warn:
+            self.window.accept_autostart()
+        self.assertFalse(self.window.autostart_on)
+        self.assertIn('未覆盖', warn.call_args.args[2])
+
+    def test_the_settings_checkbox_follows_the_startup_folder(self):
+        with patch('qt_desktop.autostart.enable') as enable, \
+             patch('qt_desktop.autostart.disable') as disable, \
+             patch('qt_desktop.autostart.enabled', return_value=True):
+            self.assertEqual('', self.window.set_autostart(True))
+            self.assertTrue(self.window.autostart_on)
+            # The truth lives in the Startup folder, so turning it off is read
+            # back from there rather than assumed from the request.
+            with patch('qt_desktop.autostart.enabled', return_value=False):
+                self.assertEqual('', self.window.set_autostart(False))
+            self.assertFalse(self.window.autostart_on)
+        self.assertEqual(1, enable.call_count)
+        self.assertEqual(1, disable.call_count)
+
+    def test_closing_the_window_keeps_reminders_running(self):
+        self.window.tray = FakeTray()
+        self.window.close()
+        # Closing means "get out of the way", not "stop reminding me".
+        self.assertFalse(self.window.controller.stopping)
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.window.tray.messages)
+
+    def test_quitting_from_the_tray_stops_the_controller(self):
+        self.window.tray = FakeTray()
+        self.window.show()
+        with patch('qt_desktop.Tray.quit_app') as quit_app:
+            self.window.close()
+        self.assertFalse(quit_app.called)
+        self.window.quitting = True
+        self.window.close()
+        self.assertTrue(self.window.controller.stopping)
+
+    def test_without_a_tray_closing_still_stops_cleanly(self):
+        self.assertIsNone(self.window.tray)
+        self.window.close()
+        self.assertTrue(self.window.controller.stopping)
+
+
+class SingleInstanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_name_is_stable_per_data_folder_and_differs_between_them(self):
+        import qt_desktop
+        first = qt_desktop.SingleInstance.name_for(Path('C:/one'))
+        self.assertEqual(first, qt_desktop.SingleInstance.name_for(Path('C:/one')))
+        self.assertNotEqual(first, qt_desktop.SingleInstance.name_for(Path('C:/two')))
+        self.assertTrue(first.startswith('MoocReminder-'))
+        self.assertNotIn('\\', first)
+        self.assertNotIn('/', first)
+
+    def test_the_second_copy_hands_over_instead_of_running(self):
+        import qt_desktop
+        name = qt_desktop.SingleInstance.name_for(Path(tempfile.gettempdir())/'single-instance-probe')
+        first = qt_desktop.SingleInstance(name)
+        second = qt_desktop.SingleInstance(name)
+        try:
+            self.assertTrue(first.claim())
+            asked = []
+            first.on_activate(lambda: asked.append(True))
+            self.assertFalse(second.claim())
+            deadline = time.monotonic() + 3
+            while not asked and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.02)
+            self.assertTrue(asked, '第二次启动应当把已有窗口叫到前台')
+        finally:
+            for instance in (first, second):
+                if instance.server is not None:
+                    instance.server.close()
+                    instance.server.removeServer(name)
+
+    def test_a_stale_socket_from_a_crash_does_not_block_startup(self):
+        import qt_desktop
+        name = qt_desktop.SingleInstance.name_for(Path(tempfile.gettempdir())/'stale-probe')
+        crashed = qt_desktop.SingleInstance(name)
+        self.assertTrue(crashed.claim())
+        crashed.server.close()  # the process died without cleaning up
+        fresh = qt_desktop.SingleInstance(name)
+        try:
+            self.assertTrue(fresh.claim())
+        finally:
+            if fresh.server is not None:
+                fresh.server.close()
+                fresh.server.removeServer(name)
 
 
 if __name__ == '__main__':

@@ -23,7 +23,8 @@ from storage import Store, default_data_dir, normalize_email_settings
 APP_FILE = 'app.json'
 ACCOUNTS_DIR = 'accounts'
 # Settings that describe how the program behaves, not who it is.
-GLOBAL_KEYS = ('interval_minutes', 'reminder_hours', 'include_quizzes', 'include_finished')
+GLOBAL_KEYS = ('interval_minutes', 'reminder_hours', 'include_quizzes', 'include_finished',
+               'autostart_prompted')
 FORMAT = 2
 
 

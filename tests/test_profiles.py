@@ -33,7 +33,8 @@ class SettingsSplitTests(unittest.TestCase):
         settings = {**DEFAULT_SETTINGS, 'home_url': HOME_A, 'interval_minutes': 15}
         shared, per_account = split_settings(settings)
         self.assertEqual(shared, dict(interval_minutes=15, reminder_hours=[72, 24, 3],
-                                      include_quizzes=True, include_finished=False))
+                                      include_quizzes=True, include_finished=False,
+                                      autostart_prompted=False))
         self.assertNotIn('home_url', shared)
         self.assertEqual(per_account['home_url'], HOME_A)
 

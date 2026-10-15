@@ -1,6 +1,8 @@
 """Native macOS-inspired desktop, with a shared embedded MOOC browser."""
 import argparse
 from datetime import datetime
+import hashlib
+import html
 import json
 from pathlib import Path
 import sys
@@ -16,12 +18,17 @@ prepare_qt(_data)
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
-    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QTextBrowser)
+    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QTextBrowser, QStackedWidget, QMenu,
+    QSystemTrayIcon)
 from portal import Controller
+import autostart
+import browser
 import emailer
 import mail_guide
+import mail_log
 import profiles as profiles_module
 from core import account_id, binding_state as core_binding_state
 from qt_reader import Manager
@@ -44,6 +51,20 @@ QTableWidget{background:#fff;border:none;color:#66768e;font-size:12px;gridline-c
 QTableWidget::item{padding:8px;border-bottom:1px solid #eef1f6}QHeaderView::section{background:#fbfcfe;border:none;border-bottom:1px solid #e9eef6;padding:13px;color:#9ba8bc;font-size:11px}
 QCheckBox{color:#9aa6ba;padding:8px}QScrollBar:vertical{background:#f6f8fc;width:7px}QScrollBar::handle:vertical{background:#dce3ef;border-radius:3px}
 '''
+
+# The middle of the window is a stack of pages; the sidebar switches between
+# them. Before this existed the first three entries all re-ran `refresh()`, so
+# clicking them changed nothing at all.
+PAGES = {
+    'overview': dict(text='◫   总览', title='作业概览', subtitle='截止时间看清楚，学习节奏更从容。', group='学习空间'),
+    'assignments': dict(text='☷   作业清单', title='作业清单', subtitle='搜索、筛选、勾选完成，都在这一页。', group='学习空间'),
+    'courses': dict(text='▤   我的课程', title='我的课程', subtitle='每次检查作业后读到的课程会列在这里。', group='学习空间'),
+    'log': dict(text='✉   发信记录', title='邮件发送记录', subtitle='每一封提醒是否发出、为什么失败，都在这里。', group='偏好设置'),
+    'details': dict(text='ⓘ   连接详情', title='连接详情', subtitle='当前状态、错误记录与本机数据位置。', group='偏好设置'),
+}
+# 'settings' is not a page: 提醒设置 is a dialog, so it stays an action button.
+NAV_GROUPS = (('学习空间', ('overview', 'assignments', 'courses')),
+              ('偏好设置', ('log', 'settings', 'details')))
 
 
 class EmailSettingsForm(QWidget):
@@ -90,6 +111,9 @@ class EmailSettingsForm(QWidget):
         form.addRow('接收提醒的邮箱', self.recipient)
         form.addRow('每日发信时刻', self.digest)
         layout.addLayout(form)
+        self.digest_hint = QLabel('到点发一封汇总邮件，列出所有未截止作业；与“提前提醒”互不影响，两种邮件都会发。')
+        self.digest_hint.setObjectName('muted'); self.digest_hint.setWordWrap(True)
+        layout.addWidget(self.digest_hint)
         # Everything below is optional: the program ships a sender, so an
         # ordinary user only needs the address above.
         self.advanced_toggle = QCheckBox('高级选项（自定义发件邮箱与服务器）')
@@ -217,6 +241,61 @@ class EmailSettingsForm(QWidget):
             return
         self.hint.setText('正在发送测试邮件…')
         self.test_requested.emit(self.values())
+
+
+class EmailLogPage(QWidget):
+    """What the program has sent, when, and why anything failed.
+
+    Until this existed the send log was only reachable through 连接详情, which
+    showed a single message, so a user could not tell whether a reminder had
+    gone out at all.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(12)
+        card = QFrame(); card.setObjectName('card'); panel = QVBoxLayout(card)
+        panel.setContentsMargins(20, 18, 20, 14); panel.setSpacing(12)
+        self.hint = QLabel(''); self.hint.setObjectName('muted'); self.hint.setWordWrap(True)
+        panel.addWidget(self.hint)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['时间', '类型', '结果', '说明'])
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for column, width in [(0, 132), (1, 96), (2, 84)]:
+            self.table.setColumnWidth(column, width)
+        self.table.verticalHeader().hide(); self.table.setShowGrid(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        panel.addWidget(self.table, 1)
+        self.empty = QLabel('还没有发送记录。\n\n设置好接收提醒的邮箱后，每封邮件的结果都会记在这里。')
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter); self.empty.setMinimumHeight(220)
+        self.empty.setStyleSheet('color:#a4afc1;font-size:14px'); panel.addWidget(self.empty, 1)
+        layout.addWidget(card, 1)
+        self.status = QLabel(''); self.status.setObjectName('muted'); self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.set_log({})
+
+    def set_log(self, log=None, status=''):
+        """Fill the table from `store.data['email_log']`."""
+        rows = mail_log.entries(log)
+        counts = mail_log.summary(log)
+        if counts['total']:
+            head = f'共 {counts["total"]} 条提醒记录，其中 {counts["failed"]} 条发送失败。'
+        else:
+            head = '还没有提醒记录。'
+        self.hint.setText(head + '作业提醒、每日汇总与测试邮件都会记在这里。')
+        self.status.setText(str(status or ''))
+        self.table.setVisible(bool(rows)); self.empty.setVisible(not rows)
+        self.table.setRowCount(len(rows))
+        for row, entry in enumerate(rows):
+            for column, value in enumerate([entry['when'], entry['kind'], entry['result'], entry['note']]):
+                cell = QTableWidgetItem(value)
+                if entry['failed']:
+                    cell.setForeground(QColor('#c0392b'))
+                elif entry['ok']:
+                    cell.setForeground(QColor('#2e7d5b'))
+                self.table.setItem(row, column, cell)
+            self.table.setRowHeight(row, 38)
 
 
 class RegisterDialog(QDialog):
@@ -361,12 +440,70 @@ class LockScreen(QDialog):
         self.accept()
 
 
+class Tray(QSystemTrayIcon):
+    """Keeps the program reachable once its window is closed.
+
+    Closing the window only hides it, so without a tray icon there is a
+    background process the user has no way back into -- and, with autostart on,
+    no way to stop it either.  The menu is the answer to both.
+    """
+
+    def __init__(self, window):
+        icon = Path(__file__).parent/'assets/MoocReminder.ico'
+        super().__init__(QIcon(str(icon)) if icon.exists() else QIcon(), window)
+        self.window = window
+        menu = QMenu()
+        self.open_action = menu.addAction('打开主窗口')
+        self.pause_action = menu.addAction('暂停提醒')
+        self.pause_action.setCheckable(True)
+        self.pause_action.setChecked(bool(window.controller.paused))
+        menu.addSeparator()
+        self.exit_action = menu.addAction('退出 MoocReminder')
+        self.open_action.triggered.connect(self.show_window)
+        self.pause_action.triggered.connect(lambda: window.toggle_pause())
+        self.exit_action.triggered.connect(self.quit_app)
+        self.setContextMenu(menu)
+        self.activated.connect(self.activated_reason)
+        self.setToolTip(f'{APP_NAME} · 作业提醒 {VERSION}')
+
+    def activated_reason(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_window()
+
+    def show_window(self):
+        window = self.window
+        window.show()
+        window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+        window.raise_()
+        window.activateWindow()
+
+    def quit_app(self):
+        """Leave for real, the way closing the window no longer does."""
+        self.window.quitting = True
+        self.hide()
+        QApplication.instance().quit()
+
+    def sync(self, snapshot):
+        """Follow the controller: the checkmark and the tooltip are its state."""
+        paused = bool(snapshot.get('paused'))
+        if self.pause_action.isChecked() != paused:
+            self.pause_action.setChecked(paused)
+        pending = snapshot.get('summary', {}).get('pending', 0)
+        self.setToolTip(f'{APP_NAME} · {pending} 项待完成' if pending else f'{APP_NAME} · 暂无待完成作业')
+
+
 class Window(QMainWindow):
-    def __init__(self, store, profiles=None):
+    def __init__(self, store, profiles=None, tray=True):
         super().__init__()
         self.store = store
         self.profiles = profiles or profiles_module.Profiles(profiles_module.folder_for_store(store.folder))
+        self.workspace = Path(__file__).resolve().parent
         self._email_dialog = None
+        self.tray = None
+        self.quitting = False
+        # Read once and cached: answering this means a PowerShell round trip, and
+        # refresh() runs four times a second.
+        self.autostart_on = autostart.enabled(self.workspace)
         self.manager = Manager(store.folder, self)
         self.controller = Controller(store, context_provider=self.manager.context, profile_dir='web-profiles')
         self.manager.on_error = lambda message: self.controller.events.put(('error', message))
@@ -381,7 +518,28 @@ class Window(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(250)
+        if tray:
+            self.create_tray()
         self.refresh()
+
+    def create_tray(self):
+        """Add the tray icon when the desktop actually provides one.
+
+        Headless machines, remote sessions and ``--smoke-report`` have no tray,
+        and asking for one there would leave an icon that can never be clicked.
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        self.tray = Tray(self)
+        self.tray.show()
+        return self.tray
+
+    def notify(self, title, message):
+        """Report something the user cannot see if the window is hidden."""
+        if self.tray is not None:
+            self.tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 8000)
+        else:
+            QMessageBox.information(self, title, message)
 
     def _build(self):
         outer = QWidget()
@@ -398,12 +556,23 @@ class Window(QMainWindow):
         dots.addStretch(); sidebar.addLayout(dots); sidebar.addSpacing(25)
         brand = QLabel(APP_NAME); brand.setObjectName('brand'); brand.setStyleSheet('font-size:21px'); sidebar.addWidget(brand)
         subtitle = QLabel('COURSE REMINDERS'); subtitle.setObjectName('muted'); sidebar.addWidget(subtitle); sidebar.addSpacing(23)
-        caption = QLabel('学习空间'); caption.setObjectName('muted'); sidebar.addWidget(caption)
-        for text, action, active in [('◫   总览', self.refresh, True), ('☷   作业清单', self.refresh, False), ('▤   我的课程', self.show_courses, False)]:
-            button = QPushButton(text); button.setObjectName('nav'); button.setProperty('active', active); button.clicked.connect(action); sidebar.addWidget(button)
-        sidebar.addSpacing(20); label = QLabel('偏好设置'); label.setObjectName('muted'); sidebar.addWidget(label)
-        for text, action in [('♧   提醒设置', self.settings), ('ⓘ   连接详情', self.details)]:
-            button = QPushButton(text); button.setObjectName('nav'); button.clicked.connect(action); sidebar.addWidget(button)
+        # Every entry above 偏好设置 switches the page shown in the middle.
+        self.nav_buttons = {}
+        for index, (caption_text, keys) in enumerate(NAV_GROUPS):
+            if index:
+                sidebar.addSpacing(20)
+            caption = QLabel(caption_text); caption.setObjectName('muted'); sidebar.addWidget(caption)
+            for key in keys:
+                button = QPushButton(PAGES[key]['text'] if key in PAGES else '♧   提醒设置')
+                button.setObjectName('nav')
+                button.setProperty('active', key == 'overview')
+                if key in PAGES:
+                    button.clicked.connect(lambda _, page=key: self.show_page(page))
+                else:
+                    # 提醒设置 stays a dialog, so it is tracked but has no page.
+                    button.clicked.connect(self.settings)
+                self.nav_buttons[key] = button
+                sidebar.addWidget(button)
         sidebar.addStretch()
         note = QLabel('把重要的日期，\n留在视线里。'); note.setStyleSheet('font-size:13px;line-height:24px;color:#9ca7b9'); sidebar.addWidget(note)
         sidebar.addSpacing(21)
@@ -415,17 +584,25 @@ class Window(QMainWindow):
         self.connection = QLabel('●  尚未连接慕课'); self.connection.setObjectName('muted'); sidebar.addWidget(self.connection)
         layout.addWidget(side)
         main = QWidget(); body = QVBoxLayout(main); body.setContentsMargins(32, 23, 32, 19); body.setSpacing(18)
-        top = QHBoxLayout(); crumb = QLabel('学习空间  /  总览'); crumb.setObjectName('muted'); top.addWidget(crumb); top.addStretch()
+        top = QHBoxLayout(); self.crumb = QLabel('学习空间  /  总览'); self.crumb.setObjectName('muted'); top.addWidget(self.crumb); top.addStretch()
         date = QLabel(datetime.now().strftime('%m月%d日')); date.setObjectName('muted'); top.addWidget(date)
         self.email_button = QPushButton('邮件提醒'); self.email_button.setFixedWidth(96)
         self.email_button.setToolTip('设置接收提醒的邮箱，无需先登录慕课')
         self.email_button.clicked.connect(self.open_email_settings); top.addWidget(self.email_button)
         self.pause = QPushButton('暂停'); self.pause.setFixedWidth(72); self.pause.clicked.connect(self.toggle_pause); top.addWidget(self.pause); body.addLayout(top)
         heading = QHBoxLayout(); title_block = QVBoxLayout(); eyebrow = QLabel('A LITTLE MORE ORGANIZED'); eyebrow.setObjectName('muted'); title_block.addWidget(eyebrow)
-        title = QLabel('作业概览'); title.setObjectName('title'); title_block.addWidget(title); title_block.addWidget(QLabel('截止时间看清楚，学习节奏更从容。')); heading.addLayout(title_block); heading.addStretch()
+        self.page_title = QLabel('作业概览'); self.page_title.setObjectName('title'); title_block.addWidget(self.page_title)
+        self.page_subtitle = QLabel('截止时间看清楚，学习节奏更从容。'); title_block.addWidget(self.page_subtitle)
+        heading.addLayout(title_block); heading.addStretch()
         self.login = QPushButton('连接慕课'); self.login.clicked.connect(self.open_login); heading.addWidget(self.login)
         self.scan = QPushButton('检查作业'); self.scan.setObjectName('primary'); self.scan.clicked.connect(lambda: self.request('scan')); heading.addWidget(self.scan); body.addLayout(heading)
         self.status = QLabel('在内置窗口中登录慕课，再回来检查作业。'); self.status.setWordWrap(True); self.status.setStyleSheet('background:#edf3ff;border:1px solid #e0e9fb;border-radius:8px;padding:12px;color:#849bc0'); body.addWidget(self.status)
+        self.pages = QStackedWidget(); self.page_index = {}; self.page_titles = {}
+        body.addWidget(self.pages, 1)
+
+        # ---- 总览：绑定引导、统计数字、最近要交的作业 ----
+        overview = QWidget(); overview_page = QVBoxLayout(overview)
+        overview_page.setContentsMargins(0, 0, 0, 0); overview_page.setSpacing(18)
         # Shown until this account has bound both its MOOC page and its email.
         self.binding = QFrame(); self.binding.setObjectName('card')
         binding_row = QHBoxLayout(self.binding); binding_row.setContentsMargins(20, 16, 20, 16)
@@ -436,13 +613,42 @@ class Window(QMainWindow):
         binding_row.addLayout(binding_copy); binding_row.addStretch()
         self.binding_button = QPushButton('绑定慕课与邮箱'); self.binding_button.setObjectName('primary')
         self.binding_button.clicked.connect(self.open_binding); binding_row.addWidget(self.binding_button)
-        body.addWidget(self.binding)
+        overview_page.addWidget(self.binding)
+        # Asked exactly once, here rather than in the middle of startup: turning
+        # autostart on is the user's decision, and it should not stand between
+        # them and the window they just asked for.
+        self.autostart = QFrame(); self.autostart.setObjectName('card')
+        prompt_row = QHBoxLayout(self.autostart); prompt_row.setContentsMargins(20, 16, 20, 16)
+        prompt_copy = QVBoxLayout()
+        prompt_title = QLabel('要不要开机自动启动？'); prompt_title.setObjectName('sectionTitle')
+        prompt_detail = QLabel('开启后，登录 Windows 就会在托盘里自动运行，不用每次自己打开；'
+                               '随时可以在“提醒设置”里关掉。'); prompt_detail.setObjectName('muted'); prompt_detail.setWordWrap(True)
+        prompt_copy.addWidget(prompt_title); prompt_copy.addWidget(prompt_detail)
+        prompt_row.addLayout(prompt_copy); prompt_row.addStretch()
+        self.autostart_yes = QPushButton('开启开机自启'); self.autostart_yes.setObjectName('primary')
+        self.autostart_yes.clicked.connect(self.accept_autostart); prompt_row.addWidget(self.autostart_yes)
+        self.autostart_no = QPushButton('不用了'); self.autostart_no.clicked.connect(self.decline_autostart)
+        prompt_row.addWidget(self.autostart_no)
+        overview_page.addWidget(self.autostart)
         metrics = QHBoxLayout(); metrics.setSpacing(17); self.metrics = {}
         for key, name, desc in [('pending', '待完成 / 待核对', '所有尚未截止的任务'), ('soon', '3 天内截止', '优先安排时间完成'), ('courses', '已读取课程', 'MOOC · 校内 SPOC')]:
             card = QFrame(); card.setObjectName('card'); card_layout = QVBoxLayout(card); card_layout.setContentsMargins(21, 15, 21, 16); card_layout.addWidget(QLabel(name))
             value = QLabel('0'); value.setObjectName('metric'); card_layout.addWidget(value); self.metrics[key] = value
             desc_label = QLabel(desc); desc_label.setObjectName('muted'); card_layout.addWidget(desc_label); metrics.addWidget(card)
-        body.addLayout(metrics)
+        overview_page.addLayout(metrics)
+        soon_card = QFrame(); soon_card.setObjectName('card'); soon_panel = QVBoxLayout(soon_card)
+        soon_panel.setContentsMargins(20, 18, 20, 14); soon_panel.setSpacing(12)
+        soon_title = QLabel('最近要交的作业'); soon_title.setObjectName('sectionTitle'); soon_panel.addWidget(soon_title)
+        self.overview_list = QLabel(''); self.overview_list.setTextFormat(Qt.TextFormat.RichText)
+        self.overview_list.setWordWrap(True); soon_panel.addWidget(self.overview_list)
+        soon_panel.addStretch(); overview_page.addWidget(soon_card, 1)
+        self.overview_more = QPushButton('查看全部作业'); self.overview_more.clicked.connect(lambda: self.show_page('assignments'))
+        overview_page.addWidget(self.overview_more, 0, Qt.AlignmentFlag.AlignLeft)
+        self.add_page('overview', overview)
+
+        # ---- 作业清单：搜索、筛掉已截止、逐项勾选完成 ----
+        assignments = QWidget(); assignment_page = QVBoxLayout(assignments)
+        assignment_page.setContentsMargins(0, 0, 0, 0); assignment_page.setSpacing(12)
         card = QFrame(); card.setObjectName('card'); panel = QVBoxLayout(card); panel.setContentsMargins(20, 18, 20, 14); panel.setSpacing(12)
         row = QHBoxLayout(); title = QLabel('接下来的作业'); title.setObjectName('sectionTitle'); row.addWidget(title); row.addStretch(); self.interval = QLabel('每 30 分钟检查'); self.interval.setObjectName('muted'); row.addWidget(self.interval); panel.addLayout(row)
         tools = QHBoxLayout(); self.search = QLineEdit(); self.search.setPlaceholderText('搜索课程或作业'); self.search.textChanged.connect(self.refresh); tools.addWidget(self.search)
@@ -455,10 +661,76 @@ class Window(QMainWindow):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.cellDoubleClicked.connect(self.open_course); panel.addWidget(self.table, 1)
         self.empty = QLabel('▣\n\n先连接慕课，作业就有了归处\n\n在官网完成登录，再回来检查一次作业。'); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter); self.empty.setMinimumHeight(240); self.empty.setStyleSheet('color:#a4afc1;font-size:14px'); panel.addWidget(self.empty, 1)
         row = QHBoxLayout(); self.last_update = QLabel('等待首次连接'); self.last_update.setObjectName('muted'); row.addWidget(self.last_update); row.addStretch()
-        test = QPushButton('测试提醒'); test.clicked.connect(lambda: self.controller.add_notification(test=True)); row.addWidget(test); panel.addLayout(row); body.addWidget(card, 1)
+        test = QPushButton('测试提醒'); test.clicked.connect(lambda: self.controller.add_notification(test=True)); row.addWidget(test); panel.addLayout(row)
+        assignment_page.addWidget(card, 1)
+        self.add_page('assignments', assignments)
+
+        # ---- 我的课程 ----
+        courses = QWidget(); course_page = QVBoxLayout(courses)
+        course_page.setContentsMargins(0, 0, 0, 0); course_page.setSpacing(12)
+        course_card = QFrame(); course_card.setObjectName('card'); course_panel = QVBoxLayout(course_card)
+        course_panel.setContentsMargins(20, 18, 20, 14); course_panel.setSpacing(12)
+        course_panel.addWidget(QLabel('读到的课程'))
+        self.course_table = QTableWidget(0, 2); self.course_table.setHorizontalHeaderLabels(['课程', '操作'])
+        self.course_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.course_table.setColumnWidth(1, 150); self.course_table.verticalHeader().hide()
+        self.course_table.setShowGrid(False); self.course_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.course_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.course_table.cellDoubleClicked.connect(self.open_course_page); course_panel.addWidget(self.course_table, 1)
+        self.course_empty = QLabel('还没有读到课程。\n\n绑定慕课账号并点“检查作业”后，这里会列出所有课程。')
+        self.course_empty.setAlignment(Qt.AlignmentFlag.AlignCenter); self.course_empty.setMinimumHeight(220)
+        self.course_empty.setStyleSheet('color:#a4afc1;font-size:14px'); course_panel.addWidget(self.course_empty, 1)
+        course_page.addWidget(course_card, 1)
+        self.add_page('courses', courses)
+
+        # ---- 发信记录 ----
+        self.log_page = EmailLogPage()
+        self.add_page('log', self.log_page)
+
+        # ---- 连接详情 ----
+        details = QWidget(); detail_page = QVBoxLayout(details)
+        detail_page.setContentsMargins(0, 0, 0, 0); detail_page.setSpacing(12)
+        detail_card = QFrame(); detail_card.setObjectName('card'); detail_panel = QVBoxLayout(detail_card)
+        detail_panel.setContentsMargins(20, 18, 20, 14); detail_panel.setSpacing(12)
+        detail_panel.addWidget(QLabel('当前状态'))
+        self.details_text = QPlainTextEdit(); self.details_text.setReadOnly(True)
+        self.details_text.setStyleSheet('background:#fbfcfe;border:1px solid #eef1f6')
+        detail_panel.addWidget(self.details_text, 1); detail_page.addWidget(detail_card, 1)
+        self.add_page('details', details)
+
         bottom = QLabel('“请核对”表示官网未明确显示提交状态。完成后勾选条目，可停止这项作业的本地提醒。'); bottom.setObjectName('muted'); bottom.setWordWrap(True); body.addWidget(bottom)
         footer = QHBoxLayout(); footer.addWidget(QLabel(f'{APP_NAME}  {VERSION}')); footer.addStretch(); footer.addWidget(QLabel('本机运行 · 北京时间')); body.addLayout(footer)
         layout.addWidget(main, 1); self.setCentralWidget(outer)
+        self.show_page('overview', refresh=False)
+
+    def add_page(self, key, widget):
+        """Register one page of the middle stack, titled from PAGES."""
+        self.page_index[key] = self.pages.addWidget(widget)
+        self.page_titles[key] = PAGES[key]
+
+    def show_page(self, key, refresh=True):
+        """Switch the visible page and mark its sidebar entry as current."""
+        if key not in self.page_index:
+            return
+        self.pages.setCurrentIndex(self.page_index[key])
+        page = self.page_titles[key]
+        self.page_title.setText(page['title']); self.page_subtitle.setText(page['subtitle'])
+        self.crumb.setText(f"{page['group']}  /  {page['title']}")
+        for name, button in self.nav_buttons.items():
+            button.setProperty('active', name == key)
+            # Qt only re-reads a dynamic property when the widget is repolished.
+            button.style().unpolish(button); button.style().polish(button)
+        if refresh:
+            self.refresh()
+        return key
+
+    def current_page(self):
+        """The key of the page on screen, for tests and for callers."""
+        index = self.pages.currentIndex()
+        for key, position in self.page_index.items():
+            if position == index:
+                return key
+        return None
 
     def open_login(self):
         """Offer both ways in: the built-in window, or cookies from a browser."""
@@ -506,8 +778,17 @@ class Window(QMainWindow):
             if not pasted:
                 self.cookie_error.setText('请先粘贴 Cookie。')
                 return
-            if not self.store.is_bound():
-                self.cookie_error.setText('请先绑定慕课主页与邮箱，再登录。')
+            # Pasting cookies needs the MOOC page (to check which account they
+            # belong to), but never the mailbox, so it must not be gated on the
+            # whole binding.
+            if not self.binding_state()['mooc']:
+                self.cookie_error.setText('请先在“绑定慕课与邮箱”里填好慕课课程主页，再粘贴 Cookie。')
+                return
+            found = browser.cookie_names_found(pasted)
+            if not found:
+                self.cookie_error.setText(
+                    '没有读到慕课登录 Cookie。请确认复制的是“Cookie”请求头的全部内容，'
+                    '里面应包含 NTESSTUDYSI、STUDY_SESS 等字段。')
                 return
             dialog.accept()
             self.request('cookie_login', cookies=pasted)
@@ -532,7 +813,11 @@ class Window(QMainWindow):
             text = f'这是一条测试提醒。最小化 {APP_NAME} 后，仍会提醒。' if notice['test'] else '\n\n'.join(f"{item['course']} · {item['name']}\n截止：{item['deadline']} · 剩余：{item['remaining']}" for item in notice['items'])
             box = QMessageBox(self); box.setWindowTitle(f'{APP_NAME} · 作业提醒'); box.setText('提醒已准备好' if notice['test'] else '作业即将截止'); box.setInformativeText(text); box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint); box.show()
         if self.controller.stopping and not self.controller.worker.is_alive():
-            self.manager.shutdown()
+            try:
+                self.manager.shutdown()
+            except Exception:
+                # Never let a browser cleanup failure keep the window open.
+                pass
             QApplication.instance().quit()
 
     def refresh(self, *_):
@@ -540,6 +825,7 @@ class Window(QMainWindow):
         self.refresh_accounts()
         bound = self.binding_state()
         self.binding.setVisible(not all(bound.values()))
+        self.autostart.setVisible(not data['settings'].get('autostart_prompted') and not self.autostart_on)
         if not all(bound.values()):
             missing = [name for name, ok in (('慕课账号', bound['mooc']), ('接收提醒的邮箱', bound['email'])) if not ok]
             self.binding_detail.setText('尚未绑定：' + '、'.join(missing) + '。绑定后即可检查作业并收到提醒。')
@@ -549,6 +835,8 @@ class Window(QMainWindow):
         self.status.setText(data['phase'] + (f" · {data['elapsed']} 秒" if data['busy'] else ''))
         self.cancel.setVisible(data['busy'])
         self.connection.setText('●  已连接慕课' if data['connected'] else '●  等待完成登录' if data['job']=='waiting_login' else '●  尚未连接慕课')
+        if self.tray is not None:
+            self.tray.sync(data)
         for key, label in self.metrics.items(): label.setText(str(data['summary'][key]))
         self.interval.setText('自动检查已暂停' if data['paused'] else f"每 {data['settings']['interval_minutes']} 分钟检查")
         self.last_update.setText('上次检查：'+(data['last_scan'][11:16] if data['last_scan'] else '尚未检查'))
@@ -557,17 +845,69 @@ class Window(QMainWindow):
         signature = json.dumps([(i['uid'],i['done'],i['name'],i['course'],i['course_url'],i['kind'],
             i['deadline_label'],i['remaining'],i['status_label'],
             i['remaining_hours'] is not None and 0<i['remaining_hours']<=72) for i in items])
-        if signature == self.last_signature:
+        # The table is only rebuilt when its contents actually change, so typing
+        # in the search box stays responsive on a long list.
+        if signature != self.last_signature:
+            self.last_signature = signature
+            self.current_items = items
+            self.table.setRowCount(len(items))
+            for row, item in enumerate(items):
+                checkbox = QCheckBox(); checkbox.setChecked(item['done']); checkbox.stateChanged.connect(lambda _, uid=item['uid'], box=checkbox: self.complete(uid,box.isChecked())); self.table.setCellWidget(row,0,checkbox)
+                for column, value in [(1,item['name']+'\n'+item['course']), (2,item['kind']), (3,item['deadline_label']), (4,item['remaining']), (5,item['status_label'])]:
+                    cell = QTableWidgetItem(value); self.table.setItem(row,column,cell)
+                    if item['remaining_hours'] is not None and 0<item['remaining_hours']<=72: cell.setBackground(QColor('#fff9ef'))
+                self.table.setRowHeight(row,67)
+        self.table.setVisible(bool(items)); self.empty.setVisible(not items)
+        self.fill_overview(data['items'])
+        self.fill_courses(data['courses'])
+        self.log_page.set_log(data['email_log'], data['email_status'])
+        self.fill_details(data)
+
+    def fill_overview(self, items):
+        """The overview page lists the few tasks that need attention first."""
+        upcoming = [item for item in items if not item['done'] and not item['expired']][:5]
+        self.overview_more.setVisible(bool(upcoming))
+        if not upcoming:
+            self.overview_list.setText('暂时没有待完成的作业。<br>绑定慕课账号与邮箱后，点“检查作业”就能读到它们。')
             return
-        self.last_signature = signature
-        self.current_items = items
-        self.table.setVisible(bool(items)); self.empty.setVisible(not items); self.table.setRowCount(len(items))
-        for row, item in enumerate(items):
-            checkbox = QCheckBox(); checkbox.setChecked(item['done']); checkbox.stateChanged.connect(lambda _, uid=item['uid'], box=checkbox: self.complete(uid,box.isChecked())); self.table.setCellWidget(row,0,checkbox)
-            for column, value in [(1,item['name']+'\n'+item['course']), (2,item['kind']), (3,item['deadline_label']), (4,item['remaining']), (5,item['status_label'])]:
-                cell = QTableWidgetItem(value); self.table.setItem(row,column,cell)
-                if item['remaining_hours'] is not None and 0<item['remaining_hours']<=72: cell.setBackground(QColor('#fff9ef'))
-            self.table.setRowHeight(row,67)
+        blocks = []
+        for item in upcoming:
+            blocks.append(
+                f'<div style="margin-bottom:11px">'
+                f'<b style="color:#3b4a63">{html.escape(str(item["name"]))}</b>'
+                f'<span style="color:#a3adbe"> · {html.escape(str(item["course"]))}</span><br>'
+                f'<span style="color:#849bc0">截止 {html.escape(str(item["deadline_label"]))} · '
+                f'剩余 {html.escape(str(item["remaining"]))}</span></div>')
+        self.overview_list.setText(''.join(blocks))
+
+    def fill_courses(self, courses):
+        self.course_rows = list(courses)
+        self.course_table.setVisible(bool(courses)); self.course_empty.setVisible(not courses)
+        self.course_table.setRowCount(len(courses))
+        for row, course in enumerate(courses):
+            name = QTableWidgetItem(str(course.get('name', '')))
+            link = QTableWidgetItem('双击打开课程页')
+            link.setData(Qt.ItemDataRole.UserRole, str(course.get('url', '')))
+            self.course_table.setItem(row, 0, name); self.course_table.setItem(row, 1, link)
+            self.course_table.setRowHeight(row, 40)
+
+    def fill_details(self, data):
+        lines = [f"当前状态：{data['phase']}",
+                 f"是否已连接慕课：{'是' if data['connected'] else '否'}",
+                 f"下次自动检查：{data['next_check']} 秒后",
+                 f"上次检查：{data['last_scan'] or '尚未检查'}",
+                 f"数据位置：{data['data_folder']}",
+                 '', '错误记录：']
+        lines.extend(data['errors'] or ['暂无错误记录。'])
+        lines.extend(['', '最近一次邮件结果：', data['email_status'] or '暂无'])
+        self.details_text.setPlainText('\n'.join(lines))
+
+    def open_course_page(self, row, column):
+        if row < len(getattr(self, 'course_rows', [])):
+            url = str(self.course_rows[row].get('url', ''))
+            if url:
+                import webbrowser
+                webbrowser.open(url)
 
     def complete(self, uid, checked):
         item = next((item for item in self.store.items() if item.uid==uid),None)
@@ -581,16 +921,19 @@ class Window(QMainWindow):
     def toggle_pause(self):
         self.controller.paused = not self.controller.paused
         self.pause.setText('恢复' if self.controller.paused else '暂停')
+        if self.tray is not None:
+            self.tray.pause_action.setChecked(self.controller.paused)
+        self.status.setText('已暂停提醒，作业不会再检查。' if self.controller.paused else '已恢复提醒。')
 
     def toggle_maximized(self):
         self.showNormal() if self.isMaximized() else self.showMaximized()
 
     def details(self):
-        data = self.controller.snapshot()
-        QMessageBox.information(self,'连接详情', data['phase']+'\n\n'+('\n'.join(data['errors']) or '暂无错误记录。')+'\n\n数据位置：'+str(self.store.folder))
+        """Kept as an entry point; the content lives on its own page now."""
+        return self.show_page('details')
 
     def show_courses(self):
-        QMessageBox.information(self,'我的课程','\n\n'.join(course['name'] for course in self.store.data['courses']) or '首次检查后，课程会自动显示。')
+        return self.show_page('courses')
 
     def open_binding(self):
         """Bind the MOOC course page and the reminder email for this account."""
@@ -625,7 +968,7 @@ class Window(QMainWindow):
 
         def apply():
             try:
-                self.controller.settings(dict(home_url=home.text().strip(), email=form.values()))
+                warnings = self.controller.settings(dict(home_url=home.text().strip(), email=form.values()))
                 self.profiles.save_shared(self.store.data['settings'])
                 self.last_signature = None
             except Exception as exc:
@@ -633,7 +976,11 @@ class Window(QMainWindow):
                 return
             dialog.accept()
             self.refresh()
-            if self.store.is_bound():
+            if warnings:
+                # The course link and the mailbox are saved together; a mailbox
+                # that is not ready must not hide the fact that the link stuck.
+                self.status.setText('　'.join(warnings))
+            elif self.store.is_bound():
                 self.status.setText('绑定完成，正在检查作业…')
                 self.request('scan')
             else:
@@ -647,17 +994,57 @@ class Window(QMainWindow):
     def binding_state(self):
         return core_binding_state(self.store.data['settings'])
 
+    def set_autostart(self, wanted):
+        """Turn the sign-in entry on or off.  Returns a warning, or ''.
+
+        The truth lives in the Startup folder, not in the settings file, so the
+        state is read back rather than assumed -- and re-read into the cached
+        flag the checkbox and the prompt card follow.
+        """
+        wanted = bool(wanted)
+        try:
+            if wanted:
+                autostart.enable(self.workspace, python=sys.executable)
+            else:
+                autostart.disable(self.workspace)
+            self.autostart_on = autostart.enabled(self.workspace)
+            return ''
+        except Exception as exc:
+            self.autostart_on = autostart.enabled(self.workspace)
+            return '开机自动启动' + ('未开启：' if wanted else '未关闭：') + str(exc)
+
+    def accept_autostart(self):
+        warning = self.set_autostart(True)
+        self.finish_autostart_prompt()
+        if warning:
+            QMessageBox.warning(self, '未能开启', warning)
+
+    def decline_autostart(self):
+        self.finish_autostart_prompt()
+
+    def finish_autostart_prompt(self):
+        """Remember the answer so the card never comes back."""
+        try:
+            self.controller.settings(dict(autostart_prompted=True))
+            self.profiles.save_shared(self.store.data['settings'])
+        except Exception:
+            pass
+        self.last_signature = None
+        self.refresh()
+
     def open_email_settings(self):
         """Reachable before signing in to MOOC, so the email can be set up first."""
         patch = self.edit_email_dialog()
         if patch is None:
             return
         try:
-            self.controller.settings(dict(email=patch))
-            self.refresh()
-            self.status.setText('邮件提醒设置已保存。')
+            warnings = self.controller.settings(dict(email=patch))
         except Exception as exc:
             QMessageBox.warning(self, '邮件设置未保存', str(exc))
+            return
+        self.last_signature = None
+        self.refresh()
+        self.status.setText('邮件提醒设置已保存。' + ('　' + '　'.join(warnings) if warnings else ''))
 
     def edit_email_dialog(self):
         dialog = QDialog(self)
@@ -756,7 +1143,14 @@ class Window(QMainWindow):
         dialog=QDialog(self);dialog.setWindowTitle('提醒设置');dialog.resize(700,760);layout=QVBoxLayout(dialog);form=QFormLayout();settings=self.store.data['settings']
         home=QLineEdit(settings['home_url']);hours=QLineEdit(','.join(str(v) for v in settings['reminder_hours']));interval=QSpinBox();interval.setRange(5,1440);interval.setValue(settings['interval_minutes'])
         manual=QPlainTextEdit('\n'.join(settings['manual_urls']));quizzes=QCheckBox('同时提醒测验');quizzes.setChecked(settings['include_quizzes']);finished=QCheckBox('检查已结束学期');finished.setChecked(settings['include_finished'])
-        form.addRow('课程主页',home);form.addRow('提前提醒（小时）',hours);form.addRow('检查间隔（分钟）',interval);form.addRow('补充作业链接',manual);form.addRow(quizzes);form.addRow(finished);layout.addLayout(form)
+        form.addRow('课程主页',home);form.addRow('提前提醒（小时）',hours);form.addRow('检查间隔（分钟）',interval);form.addRow('补充作业链接',manual);form.addRow(quizzes);form.addRow(finished)
+        boot = QCheckBox('开机时自动启动（在系统托盘里运行）'); boot.setChecked(self.autostart_on)
+        form.addRow(boot)
+        layout.addLayout(form)
+        # The two kinds of mail are independent, which is not obvious from the
+        # field labels alone: users could not tell which time actually sends.
+        reminder_note=QLabel('“提前提醒”：作业还剩上面这些小时数时，立刻发一封提醒邮件，可填多个（用逗号分开）。')
+        reminder_note.setObjectName('muted');reminder_note.setWordWrap(True);layout.addWidget(reminder_note)
         divider=QLabel('邮件提醒');divider.setObjectName('sectionTitle');layout.addWidget(divider)
         mail=EmailSettingsForm(settings.get('email'),dialog);layout.addWidget(mail)
         self._email_dialog = (dialog, mail)
@@ -765,10 +1159,17 @@ class Window(QMainWindow):
         save=QPushButton('保存设置');save.setObjectName('primary');layout.addWidget(save)
         def apply():
             try:
-                self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),email=mail.values()))
+                warnings=self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),email=mail.values()))
                 self.profiles.save_shared(self.store.data['settings'])
-                dialog.accept();self.refresh()
-            except Exception as exc: QMessageBox.warning(dialog,'设置未保存',str(exc))
+            except Exception as exc:
+                QMessageBox.warning(dialog,'设置未保存',str(exc));return
+            if boot.isChecked() != self.autostart_on:
+                trouble = self.set_autostart(boot.isChecked())
+                if trouble:
+                    QMessageBox.warning(dialog,'开机自启动未生效',trouble);return
+            self.last_signature=None
+            dialog.accept();self.refresh()
+            self.status.setText('设置已保存。'+('　'+'　'.join(warnings) if warnings else ''))
         save.clicked.connect(apply);dialog.exec()
 
     def mailer_idle(self):
@@ -794,27 +1195,148 @@ class Window(QMainWindow):
         return False
 
     def closeEvent(self,event):
-        self.controller.stop()
+        if self.quitting or self.tray is None:
+            self.controller.stop()
+            self.hide()
+            event.accept()
+            return
+        # With a tray icon in place, closing means "get out of my way", not
+        # "quit": the reminders are the whole point of the program, and stopping
+        # the controller here is what previously left it running but unreachable.
         self.hide()
-        event.accept()
+        self.tray.showMessage(APP_NAME, '已最小化到托盘，提醒仍在后台运行。',
+            QSystemTrayIcon.MessageIcon.Information, 4000)
+        event.ignore()
+
+
+class SingleInstance:
+    """One running copy per data folder.
+
+    Autostart turns "the user opens the program twice" from a harmless mistake
+    into a routine event, and two copies would check the same account and mail
+    every reminder twice.  The second copy hands the message over and leaves.
+
+    A local socket is used rather than a lock file because it also carries the
+    "come to the front" request; a lock alone would make the second click look
+    like nothing happened.
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self.server = None
+
+    @staticmethod
+    def name_for(folder):
+        digest = hashlib.sha1(str(Path(folder).resolve()).encode('utf-8')).hexdigest()[:16]
+        return 'MoocReminder-' + digest
+
+    def claim(self):
+        """True when this process should run the program, False if it should not."""
+        probe = QLocalSocket()
+        probe.connectToServer(self.name)
+        if probe.waitForConnected(400):
+            probe.write(b'show')
+            # This process is about to exit, so the request has to leave the
+            # buffer first.  A request still sitting here would make the second
+            # launch look like nothing happened.
+            deadline = time.monotonic() + 2
+            while probe.bytesToWrite() and time.monotonic() < deadline:
+                probe.flush()
+                probe.waitForBytesWritten(100)
+                QApplication.processEvents()
+            probe.disconnectFromServer()
+            if probe.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                probe.waitForDisconnected(400)
+            return False
+        # A copy that crashed can leave the socket behind.  Nothing answered a
+        # moment ago, so clearing it is safe and beats refusing to start.
+        QLocalServer.removeServer(self.name)
+        self.server = QLocalServer()
+        if not self.server.listen(self.name):
+            # Cannot arbitrate: running is better than silently doing nothing.
+            self.server = None
+        return True
+
+    def on_activate(self, callback):
+        """Call `callback` when another copy asks for the window."""
+        if self.server is not None:
+            self.server.newConnection.connect(lambda: self._receive(callback))
+
+    def _receive(self, callback):
+        connection = self.server.nextPendingConnection()
+        if connection is None:
+            return
+        state = {'buffer': bytearray(), 'done': False}
+
+        def settle(signal):
+            # The bytes can be sitting in the buffer before this runs, arrive
+            # in a readyRead, or only show up as the sender goes away, so both
+            # signals feed one buffer and whichever sees the whole message acts.
+            if state['done']:
+                # Already handled: the other signal arrives after the socket is
+                # gone, and touching it then would raise.
+                return
+            state['buffer'].extend(bytes(connection.readAll()))
+            if bytes(state['buffer']).startswith(b'show'):
+                state['done'] = True
+                callback()
+            elif signal != 'gone':
+                return
+            else:
+                state['done'] = True
+            connection.readyRead.disconnect()
+            connection.disconnected.disconnect()
+            connection.deleteLater()
+
+        connection.readyRead.connect(lambda: settle('ready'))
+        connection.disconnected.connect(lambda: settle('gone'))
+        settle('ready')
+
+
+def write_startup_report(path, **fields):
+    """Tell the launcher the program is up, and in what shape."""
+    if not path:
+        return
+    target = Path(path)
+    temporary = target.with_suffix('.tmp')
+    temporary.write_text(json.dumps(fields), encoding='utf-8')
+    temporary.replace(target)
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--data-dir');parser.add_argument('--smoke-report');parser.add_argument('--preview');parser.add_argument('--startup-report');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--data-dir');parser.add_argument('--smoke-report');parser.add_argument('--preview');parser.add_argument('--startup-report')
+    parser.add_argument('--background',action='store_true',help='start hidden in the tray, as at sign-in')
+    args=parser.parse_args()
     app=QApplication(sys.argv);app.setQuitOnLastWindowClosed(False);app.setApplicationName(APP_NAME)
     # Each account keeps its own profile; the program reopens the last one used.
     account = profiles_module.Profiles(args.data_dir)
+    if args.background and not account.account_options():
+        # Signing in before the program has ever been set up: stay quiet rather
+        # than park an unusable icon in the tray.
+        return 0
+    single = None
     if not args.smoke_report:
-        # Signing in is the first thing the program asks for.
+        single = SingleInstance(SingleInstance.name_for(account.folder))
+        if not single.claim():
+            # Another copy already runs this account; it now has the window.
+            write_startup_report(args.startup_report, ready=True, already_running=True,
+                background=args.background)
+            return 0
+    if not args.smoke_report and not args.background:
+        # Signing in is the first thing the program asks for.  At sign-in there
+        # is nobody to answer, so the locked screen would just block the tray.
         gate = LockScreen(account)
         if gate.exec() != QDialog.DialogCode.Accepted:
             return 0
-    window=Window(account.load_store(), profiles=account);window.show()
+    window=Window(account.load_store(), profiles=account, tray=not args.smoke_report)
+    if single is not None:
+        single.on_activate(window.tray.show_window if window.tray else window.show)
+    if not args.background:
+        window.show()
     if args.startup_report:
         def startup_ready():
-            target=Path(args.startup_report);temporary=target.with_suffix('.tmp')
-            temporary.write_text(json.dumps({'native_window':window.isVisible()}),encoding='utf-8')
-            temporary.replace(target)
+            write_startup_report(args.startup_report, ready=True, native_window=window.isVisible(),
+                background=args.background)
         QTimer.singleShot(150,startup_ready)
     if args.smoke_report:
         def report():
@@ -823,6 +1345,7 @@ def main():
             window.close()
         QTimer.singleShot(1600,report)
     result=app.exec();window.controller.worker.join(timeout=2);return result
+
 
 
 if __name__=='__main__':
