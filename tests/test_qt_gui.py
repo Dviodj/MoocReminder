@@ -176,6 +176,45 @@ class EmailSettingsFormTests(unittest.TestCase):
         form.digest.setText('')
         self.assertEqual(form.values()['digest_times'], [])
 
+    def test_a_daily_summary_is_the_default_and_hides_the_extra_controls(self):
+        form = self.make()
+        self.assertEqual(form.digest_frequency.currentData(), 'daily')
+        self.assertFalse(form.digest_weekday.isVisibleTo(form))
+        self.assertFalse(form.digest_interval.isVisibleTo(form))
+        self.assertIn('每天发一封汇总邮件', form.digest_hint.text())
+        self.assertEqual(form.values()['digest_frequency'], 'daily')
+
+    def test_a_stored_cadence_is_shown_back(self):
+        form = self.make(digest_frequency='weekly', digest_weekday=2, digest_interval=5)
+        self.assertEqual(form.digest_frequency.currentData(), 'weekly')
+        self.assertEqual(form.digest_weekday.currentData(), 2)
+        self.assertEqual(form.digest_interval.value(), 5)
+        self.assertEqual(form.values()['digest_weekday'], 2)
+
+    def test_choosing_a_weekly_summary_asks_for_the_weekday_only(self):
+        form = self.make()
+        form.digest_frequency.setCurrentIndex(form.digest_frequency.findData('weekly'))
+        self.assertTrue(form.digest_weekday.isVisibleTo(form))
+        self.assertFalse(form.digest_interval.isVisibleTo(form))
+        form.digest_weekday.setCurrentIndex(5)
+        self.assertEqual(form.values()['digest_weekday'], 5)
+        self.assertIn('每周六', form.digest_hint.text())
+
+    def test_choosing_every_n_days_asks_for_the_number_only(self):
+        form = self.make()
+        form.digest_frequency.setCurrentIndex(form.digest_frequency.findData('interval'))
+        self.assertFalse(form.digest_weekday.isVisibleTo(form))
+        self.assertTrue(form.digest_interval.isVisibleTo(form))
+        form.digest_interval.setValue(4)
+        self.assertEqual(form.values()['digest_interval'], 4)
+        self.assertIn('每 4 天', form.digest_hint.text())
+
+    def test_an_every_n_days_summary_reopens_on_its_number(self):
+        form = self.make(digest_frequency='interval', digest_interval=7)
+        self.assertEqual(form.digest_frequency.currentData(), 'interval')
+        self.assertTrue(form.digest_interval.isVisibleTo(form))
+        self.assertIn('每 7 天', form.digest_hint.text())
+
     def test_test_request_emits_the_form_values_and_needs_a_recipient(self):
         form = self.make()
         received = []

@@ -14,7 +14,8 @@ from _bootstrap import scratch_folder
 import emailer
 import secrets_store
 from browser import parse_cookie_header
-from core import Assignment, BEIJING, DEFAULT_SETTINGS, due_digests
+from core import (Assignment, BEIJING, DEFAULT_DIGEST_INTERVAL, DEFAULT_SETTINGS, digest_cadence,
+                  digest_cadence_text, due_digests, next_digest_day)
 from emailer import (EmailError, EmailSettings, Mail, Mailer, SmtpNotifier, compose_alert, compose_digest,
                      password_saved, suggest_server, validate, valid_address, valid_digest_times, get_notifier)
 from storage import Store, normalize_email_settings
@@ -393,6 +394,72 @@ class DigestScheduleTests(unittest.TestCase):
     def test_malformed_entries_are_ignored(self):
         self.assertEqual(due_digests(['8:0', 'nonsense'], {}, NOW), [])
 
+    def test_a_daily_summary_ignores_the_weekday_setting(self):
+        """The old default must keep behaving exactly as it did."""
+        self.assertEqual(due_digests(['08:00'], {}, NOW, 'daily', 5), ['08:00'])
+
+    def test_a_weekly_summary_fires_on_its_weekday_and_is_not_repeated(self):
+        # 2026-10-14 is a Wednesday.
+        state = {}
+        self.assertEqual(due_digests(['08:00'], state, NOW, 'weekly', 2), ['08:00'])
+        self.assertEqual(due_digests(['08:00'], state, NOW.replace(hour=20), 'weekly', 2), [])
+        self.assertEqual(list(state), ['due|digest|2026-10-14|08:00'])
+
+    def test_a_weekly_summary_missed_on_its_day_arrives_late_exactly_once(self):
+        """A desktop program is not always running on the day it picked."""
+        friday = NOW.replace(day=16)
+        state = {}
+        self.assertEqual(due_digests(['08:00'], state, friday, 'weekly', 2), ['08:00'])
+        # The mark belongs to the Wednesday the summary was for, not to Friday.
+        self.assertEqual(list(state), ['due|digest|2026-10-14|08:00'])
+        self.assertEqual(due_digests(['08:00'], state, friday, 'weekly', 2), [])
+        # The next week is a new cycle, so it fires again.
+        self.assertEqual(due_digests(['08:00'], state, NOW.replace(day=21), 'weekly', 2), ['08:00'])
+
+    def test_a_weekly_summary_already_sent_is_not_sent_again_before_its_next_day(self):
+        monday = NOW.replace(day=12)
+        state = {'due|digest|2026-10-07|08:00': '2026-10-07'}
+        self.assertEqual(due_digests(['08:00'], state, monday, 'weekly', 2), [])
+
+    def test_every_n_days_counts_from_a_fixed_reference_day(self):
+        """The rhythm must not move every time the settings are saved again."""
+        state = {}
+        monday = datetime(2024, 1, 1, 9, 0, tzinfo=BEIJING)
+        self.assertEqual(due_digests(['08:00'], state, monday, 'interval', 0, 3), ['08:00'])
+        self.assertEqual(due_digests(['08:00'], state, monday.replace(day=2), 'interval', 0, 3), [])
+        self.assertEqual(due_digests(['08:00'], state, monday.replace(day=4), 'interval', 0, 3), ['08:00'])
+        self.assertEqual(list(state), ['due|digest|2024-01-01|08:00', 'due|digest|2024-01-04|08:00'])
+
+    def test_a_missed_every_n_days_summary_keeps_its_whole_day(self):
+        """A late summary is not restricted to the clock time still to come."""
+        state = {}
+        late = datetime(2024, 1, 3, 9, 0, tzinfo=BEIJING)
+        self.assertEqual(due_digests(['20:00'], state, late, 'interval', 0, 3), ['20:00'])
+        self.assertEqual(due_digests(['20:00'], state, late, 'interval', 0, 3), [])
+        self.assertEqual(list(state), ['due|digest|2024-01-01|20:00'])
+
+    def test_a_damaged_cadence_falls_back_to_the_daily_schedule(self):
+        """Bad data must never turn the summaries off without saying so."""
+        self.assertEqual(digest_cadence({}), ('daily', 0, DEFAULT_DIGEST_INTERVAL))
+        self.assertEqual(digest_cadence({'digest_frequency': 'yearly', 'digest_weekday': 99,
+                                         'digest_interval': 'nonsense'}),
+                         ('daily', 0, DEFAULT_DIGEST_INTERVAL))
+        self.assertEqual(digest_cadence({'digest_frequency': 'weekly', 'digest_weekday': 3,
+                                         'digest_interval': 5}), ('weekly', 3, 5))
+
+    def test_the_cadence_is_worded_for_the_settings_page(self):
+        self.assertEqual(digest_cadence_text('daily', 0, 3), '每天')
+        self.assertEqual(digest_cadence_text('weekly', 2, 3), '每周三')
+        self.assertEqual(digest_cadence_text('interval', 0, 5), '每 5 天')
+
+    def test_the_next_summary_day_is_computed_for_the_settings_page(self):
+        self.assertEqual(next_digest_day(NOW, 'daily', 0, 3).strftime('%Y-%m-%d'), '2026-10-14')
+        self.assertEqual(next_digest_day(NOW, 'weekly', 2, 3).strftime('%Y-%m-%d'), '2026-10-14')
+        self.assertEqual(next_digest_day(NOW, 'weekly', 5, 3).strftime('%Y-%m-%d'), '2026-10-17')
+        self.assertEqual(next_digest_day(NOW, 'interval', 0, 3).strftime('%Y-%m-%d'), '2026-10-14')
+        # 2026-10-15 is the day after a scheduled interval day.
+        self.assertEqual(next_digest_day(NOW.replace(day=15), 'interval', 0, 3).strftime('%Y-%m-%d'), '2026-10-17')
+
 
 class EmailSettingsStorageTests(unittest.TestCase):
     def setUp(self):
@@ -416,6 +483,26 @@ class EmailSettingsStorageTests(unittest.TestCase):
             normalize_email_settings({'email': dict(enabled=True, recipient='me@qq.com', security='plain')})
         with self.assertRaises(ValueError):
             normalize_email_settings({'email': 'not-a-dict'})
+
+    def test_the_summary_cadence_is_validated_and_kept(self):
+        config = normalize_email_settings({'email': dict(enabled=True, recipient='me@qq.com',
+                                                         digest_frequency='weekly', digest_weekday=2,
+                                                         digest_interval=5)})
+        self.assertEqual((config['digest_frequency'], config['digest_weekday'], config['digest_interval']),
+                         ('weekly', 2, 5))
+        kept = normalize_email_settings({'email': dict(enabled=True, recipient='me@qq.com')}, config)
+        self.assertEqual((kept['digest_frequency'], kept['digest_weekday'], kept['digest_interval']),
+                         ('weekly', 2, 5))
+        # An old data.json has none of these keys, and must stay a daily summary.
+        legacy = normalize_email_settings({'email': dict(enabled=True, recipient='me@qq.com')})
+        self.assertEqual((legacy['digest_frequency'], legacy['digest_weekday'], legacy['digest_interval']),
+                         ('daily', 0, DEFAULT_DIGEST_INTERVAL))
+
+    def test_an_impossible_cadence_is_refused_instead_of_quietly_becoming_daily(self):
+        for bad in (dict(digest_frequency='yearly'), dict(digest_weekday=7), dict(digest_weekday='周三'),
+                    dict(digest_interval=1), dict(digest_interval=31), dict(digest_interval='3')):
+            with self.assertRaises(ValueError):
+                normalize_email_settings({'email': dict(enabled=True, recipient='me@qq.com', **bad)})
 
     def test_store_persists_settings_and_send_log(self):
         store = Store(self.temp.name)

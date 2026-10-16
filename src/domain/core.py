@@ -1,6 +1,6 @@
 """Deadline and reminder rules; no browser or GUI dependencies."""
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import re
 from urllib.parse import urlsplit, parse_qs, urljoin
@@ -8,13 +8,27 @@ from urllib.parse import urlsplit, parse_qs, urljoin
 BEIJING = timezone(timedelta(hours=8))
 HOME_URL = 'https://www.icourse163.org/home.htm?userId=0#/home/course'
 COURSE_URL = 'https://www.icourse163.org/learn/EXAMPLE-1000?tid=1000#/learn/testlist'
+# How often the summary mail goes out. `interval` counts days from a fixed
+# reference day instead of from the last save, so "every 3 days" keeps the same
+# rhythm across restarts and settings changes rather than drifting each time the
+# page is opened. 2024-01-01 is a Monday, so the reference day and the weekly
+# cycle agree with each other.
+DIGEST_FREQUENCIES = ('daily', 'weekly', 'interval')
+DIGEST_EPOCH = date(2024, 1, 1)
+MIN_DIGEST_INTERVAL = 2
+MAX_DIGEST_INTERVAL = 30
+DEFAULT_DIGEST_INTERVAL = 3
+WEEKDAY_NAMES = ('周一', '周二', '周三', '周四', '周五', '周六', '周日')
+
 DEFAULT_SETTINGS = dict(home_url=HOME_URL, manual_urls=[], interval_minutes=30,
                         reminder_hours=[72, 24, 3], include_quizzes=True, include_finished=False,
                         # Whether the user has already answered the "start with
                         # Windows?" card, so it is shown once and never again.
                         autostart_prompted=False,
                         email=dict(enabled=False, recipient='', sender='', server='', port=465,
-                                   security='ssl', password='', digest_times=[]))
+                                   security='ssl', password='', digest_times=[],
+                                   digest_frequency='daily', digest_weekday=0,
+                                   digest_interval=DEFAULT_DIGEST_INTERVAL))
 
 
 def now_beijing():
@@ -243,25 +257,107 @@ def due_reminders(items, hours, state, now):
     return alerts
 
 
-def due_digests(times, state, now):
-    """Daily summary times that are due now, or that were missed earlier today.
+def _bounded_int(value, low, high, fallback):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if low <= number <= high else fallback
+
+
+def digest_cadence(email):
+    """The stored summary cadence as (frequency, weekday, interval).
+
+    A field that is missing, of the wrong type or out of range falls back to the
+    daily schedule, because a damaged setting must never turn the summaries off
+    without saying so.
+    """
+    email = email or {}
+    frequency = email.get('digest_frequency')
+    if frequency not in DIGEST_FREQUENCIES:
+        frequency = 'daily'
+    return (frequency,
+            _bounded_int(email.get('digest_weekday'), 0, 6, 0),
+            _bounded_int(email.get('digest_interval'), MIN_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL,
+                         DEFAULT_DIGEST_INTERVAL))
+
+
+def digest_day_due(day, frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """Whether a summary is scheduled on this calendar day."""
+    day = day.date() if isinstance(day, datetime) else day
+    if frequency == 'weekly':
+        return day.weekday() == weekday
+    if frequency == 'interval':
+        elapsed = (day - DIGEST_EPOCH).days
+        return elapsed >= 0 and elapsed % interval == 0
+    return True
+
+
+def digest_horizon(frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """How many days back a scheduled day still belongs to the current cycle."""
+    if frequency == 'weekly':
+        return 7
+    if frequency == 'interval':
+        return interval
+    return 0
+
+
+def digest_target_day(now, frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """The scheduled day whose summary is still outstanding, and whether it is today.
+
+    A desktop program is not always running. Without this look-back a weekly
+    summary would be skipped outright whenever the machine was off that day;
+    with it the summary arrives late -- once -- instead of never.
+    """
+    day = now.date() if isinstance(now, datetime) else now
+    for offset in range(0, digest_horizon(frequency, weekday, interval) + 1):
+        candidate = day - timedelta(days=offset)
+        if digest_day_due(candidate, frequency, weekday, interval):
+            return candidate, offset == 0
+    return day, True
+
+
+def next_digest_day(now, frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """The next scheduled day, today included."""
+    day = now.date() if isinstance(now, datetime) else now
+    for offset in range(0, MAX_DIGEST_INTERVAL + 1):
+        candidate = day + timedelta(days=offset)
+        if digest_day_due(candidate, frequency, weekday, interval):
+            return candidate
+    return day
+
+
+def digest_cadence_text(frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """The cadence in the words the settings page uses: 每天 / 每周三 / 每 3 天."""
+    if frequency == 'weekly':
+        return '每' + WEEKDAY_NAMES[weekday % 7]
+    if frequency == 'interval':
+        return f'每 {interval} 天'
+    return '每天'
+
+
+def due_digests(times, state, now, frequency='daily', weekday=0, interval=DEFAULT_DIGEST_INTERVAL):
+    """Summary times that are due now, or that were missed earlier in the cycle.
 
     A time fires once per day: when its minute arrives, or on the first check
     after it has passed, so opening the program at 09:30 still delivers the
-    08:00 summary.
+    08:00 summary. With a weekly or every-N-days cadence the mark is written
+    against the day the summary belonged to, so a summary missed while the
+    machine was off is still delivered -- late, and exactly once.
 
     The mark lives under its own `due|` prefix. It used to be written as
     `digest|<date>|<time>`, which is exactly the key the send log uses, so the
     log already looked "sent" by the time the mailer was asked -- and the daily
     summary was never sent at all.
     """
+    day, today = digest_target_day(now, frequency, weekday, interval)
     due = []
-    stamp = now.strftime('%Y-%m-%d')
+    stamp = day.strftime('%Y-%m-%d')
     for entry in times or []:
         match = re.fullmatch(r'(\d{2}):(\d{2})', str(entry))
         if not match:
             continue
-        if (int(match.group(1)), int(match.group(2))) > (now.hour, now.minute):
+        if today and (int(match.group(1)), int(match.group(2))) > (now.hour, now.minute):
             continue
         key = f'due|digest|{stamp}|{entry}'
         if state.get(key) == stamp:

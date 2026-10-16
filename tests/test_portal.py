@@ -244,6 +244,55 @@ class EmailSchedulingTests(unittest.TestCase):
             self.controller.store.prune_email_log()
         self.assertEqual({'due|digest|2026-02-14|08:00': '2026-02-14'}, self.controller.store.data['digest_state'])
 
+    def test_a_weekly_summary_is_queued_on_its_day_and_only_once_in_that_cycle(self):
+        moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)   # a Saturday
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'], digest_frequency='weekly', digest_weekday=5)
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.assertEqual(['digest|2026-02-14|08:00'], self.digests())
+        # The next day belongs to the same cycle, and the summary has gone out.
+        with patch.object(portal, 'now_beijing', lambda: moment.replace(day=15)):
+            self.controller.tick()
+        self.assertEqual(['digest|2026-02-14|08:00'], self.digests())
+
+    def test_a_weekly_summary_is_not_queued_off_its_day(self):
+        moment = datetime(2026, 2, 10, 8, 0, 30, tzinfo=BEIJING)   # the Tuesday after
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'], digest_frequency='weekly', digest_weekday=5)
+        # Saturday's summary has gone out, so this Tuesday has nothing to send.
+        self.controller.store.data['digest_state'] = {'due|digest|2026-02-07|08:00': '2026-02-07'}
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.assertEqual([], self.digests())
+
+    def test_a_weekly_summary_missed_on_its_day_is_still_delivered(self):
+        """The machine was off on Saturday; opening it later still sends it."""
+        moment = datetime(2026, 2, 15, 9, 0, 0, tzinfo=BEIJING)   # the Sunday after
+        self.add_assignment_at(moment + timedelta(hours=80))
+        self.enable_email(digest_times=['08:00'], digest_frequency='weekly', digest_weekday=5)
+        with patch.object(portal, 'now_beijing', lambda: moment):
+            self.controller.tick()
+        self.assertEqual(['digest|2026-02-15|08:00'], self.digests())
+        # The mark names the day the summary was for, not the day it went out.
+        self.assertEqual({'due|digest|2026-02-14|08:00': '2026-02-14'}, self.controller.store.data['digest_state'])
+
+    def test_a_late_weekly_mark_survives_the_rest_of_its_cycle(self):
+        """Pruning must not turn a delivered late summary into a second one."""
+        self.enable_email(digest_times=['08:00'], digest_frequency='weekly', digest_weekday=2)
+        self.controller.store.data['digest_state'] = {
+            'due|digest|2026-02-11|08:00': '2026-02-11',   # this cycle
+            'due|digest|2026-02-04|08:00': '2026-02-04',   # the cycle before
+        }
+        # `storage` imports the clock by name, so that is the one to pin.
+        with patch.object(storage, 'now_beijing', lambda: datetime(2026, 2, 14, 9, 0, 0, tzinfo=BEIJING)):
+            self.controller.store.prune_email_log()
+        self.assertEqual({'due|digest|2026-02-11|08:00': '2026-02-11'}, self.controller.store.data['digest_state'])
+
+    def digests(self):
+        """Only the summaries that this tick queued; alerts travel separately."""
+        return [key for key, _, _ in self.mailer.queued if key.startswith('digest|')]
+
     def test_a_new_recipient_gets_todays_summary_again(self):
         moment = datetime(2026, 2, 14, 8, 0, 30, tzinfo=BEIJING)
         self.add_assignment_at(moment + timedelta(hours=80))

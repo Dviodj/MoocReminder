@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 
-from core import (now_beijing, due_reminders, due_digests, remaining_text, account_id,
+from core import (now_beijing, due_reminders, due_digests, digest_cadence, remaining_text, account_id,
                   normalize_home_url, home_url_problem, course_url_problem)
 from storage import normalize_email_settings
 from worker import BrowserWorker
@@ -144,8 +144,10 @@ class Controller:
                 if alerts:
                     self.add_notification(alerts)
                     self.store.data['reminders'] = state
-                digest_due = due_digests(self.store.data['settings']['email'].get('digest_times'),
-                                         self.store.data.setdefault('digest_state', {}), now_beijing())
+                email = self.store.data['settings'].get('email') or {}
+                digest_due = due_digests(email.get('digest_times'),
+                                         self.store.data.setdefault('digest_state', {}), now_beijing(),
+                                         *digest_cadence(email))
                 self.dispatch_email(alerts, digest_due, active)
                 self.store.save()
                 profile_exists = (self.store.folder / self.profile_dir / account_id(self.store.data['settings']['home_url'])).exists()

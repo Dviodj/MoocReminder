@@ -1,5 +1,6 @@
 """Atomic local persistence, including failed-course cache retention."""
 from copy import deepcopy
+from datetime import timedelta
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,9 @@ import tempfile
 import sys
 import uuid
 
-from core import Assignment, DEFAULT_SETTINGS, account_id, binding_state, now_beijing, valid_home_url
+from core import (Assignment, DEFAULT_DIGEST_INTERVAL, DEFAULT_SETTINGS, DIGEST_FREQUENCIES,
+                  MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, account_id, binding_state, digest_cadence,
+                  digest_horizon, now_beijing, valid_home_url)
 import emailer
 import paths
 import secrets_store
@@ -57,11 +60,25 @@ def normalize_email_settings(patch, current=None):
     if times is None:
         raise ValueError('发信时刻请填写 HH:MM，例如 08:00 或 08:00,20:00。')
     merged['digest_times'] = times
+    # How often the summary goes out: every day, once a week, or every N days.
+    # Unlike the times above this is not free text, so anything unrecognised is
+    # refused instead of quietly becoming a daily summary.
+    frequency = incoming.get('digest_frequency', current.get('digest_frequency', 'daily'))
+    if frequency not in DIGEST_FREQUENCIES:
+        raise ValueError('汇总频率无效。')
+    weekday = incoming.get('digest_weekday', current.get('digest_weekday', 0))
+    interval = incoming.get('digest_interval', current.get('digest_interval', DEFAULT_DIGEST_INTERVAL))
+    if not isinstance(weekday, int) or isinstance(weekday, bool) or not 0 <= weekday <= 6:
+        raise ValueError('汇总日期请选择周一至周日。')
+    if (not isinstance(interval, int) or isinstance(interval, bool)
+            or not MIN_DIGEST_INTERVAL <= interval <= MAX_DIGEST_INTERVAL):
+        raise ValueError(f'汇总间隔请填写 {MIN_DIGEST_INTERVAL}–{MAX_DIGEST_INTERVAL} 天。')
     # Remember whether the user chose to configure the sender themselves.
     advanced = incoming.get('advanced', current.get('advanced', False))
     return dict(enabled=settings.enabled, recipient=settings.recipient.strip(), sender=settings.sender.strip(),
                 server=settings.server.strip(), port=settings.port, security=settings.security,
-                password=merged['password'], digest_times=times, advanced=bool(advanced))
+                password=merged['password'], digest_times=times, advanced=bool(advanced),
+                digest_frequency=frequency, digest_weekday=weekday, digest_interval=interval)
 
 class Store:
     def __init__(self, folder=None, settings_base=None):
@@ -168,12 +185,23 @@ class Store:
         if len(log) > 500:
             log = dict(sorted(log.items(), key=lambda pair: str(pair[1]))[-500:])
         self.data['email_log'] = log
-        # "This summary was already handled today" marks are only useful for the
-        # current day, and one is written per configured time, so they would
-        # otherwise pile up forever. Their key is `due|digest|<date>|<time>`.
-        today = now_beijing().strftime('%Y-%m-%d')
+        # "This summary was already handled" marks are only useful for the cycle
+        # they belong to, and one is written per configured time, so they would
+        # otherwise pile up forever. Their key is `due|digest|<date>|<time>`,
+        # and the date is the day the summary *belonged to* -- not today when a
+        # weekly or every-N-days summary was delivered late. Keeping a whole
+        # cycle of them is what stops that late summary being sent again on the
+        # very next tick.
+        today = now_beijing().date()
+        floor = (today - timedelta(days=digest_horizon(*digest_cadence(self.data['settings'].get('email'))))
+                 ).strftime('%Y-%m-%d')
+
+        def current_cycle(key):
+            parts = key.split('|')
+            return len(parts) > 2 and floor <= parts[2] <= today.strftime('%Y-%m-%d')
+
         self.data['digest_state'] = {key: value for key, value in self.data.get('digest_state', {}).items()
-                                     if key.split('|')[2:3] == [today]}
+                                     if current_cycle(key)}
 
     def update_settings(self, settings):
         """Merge a settings patch; only a changed MOOC account clears the cache."""

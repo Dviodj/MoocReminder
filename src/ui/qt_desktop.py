@@ -34,7 +34,9 @@ import emailer
 import mail_guide
 import mail_log
 import profiles as profiles_module
-from core import account_id, binding_state as core_binding_state
+from core import (DEFAULT_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, WEEKDAY_NAMES,
+                  account_id, binding_state as core_binding_state, digest_cadence_text, next_digest_day,
+                  now_beijing)
 from qt_reader import Manager
 
 STYLE = '''
@@ -69,6 +71,14 @@ PAGES = {
 # 'settings' is not a page: 提醒设置 is a dialog, so it stays an action button.
 NAV_GROUPS = (('学习空间', ('overview', 'assignments', 'courses')),
               ('偏好设置', ('log', 'settings', 'details')))
+
+
+def _whole_number(value, fallback):
+    """Read a stored number without letting a damaged one reach the widgets."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 class EmailSettingsForm(QWidget):
@@ -117,12 +127,45 @@ class EmailSettingsForm(QWidget):
         self.password.setPlaceholderText('已保存，留空则不修改' if self.saved_password else '留空则使用程序预置的授权码')
         self.digest = QLineEdit(','.join(email.get('digest_times', []) or []))
         self.digest.setPlaceholderText('例如 08:00,20:00，留空则只按截止时间提醒')
+        # How often the summary goes out. "Every day" is what this program always
+        # did; a weekly or every-N-days cadence is what a quiet course actually
+        # needs, so the clock time above stays one setting and the rhythm becomes
+        # another instead of the two being crammed into one field.
+        self.digest_frequency = QComboBox()
+        self.digest_frequency.addItem('每天', 'daily')
+        self.digest_frequency.addItem('每周一次', 'weekly')
+        self.digest_frequency.addItem('每 N 天一次', 'interval')
+        index = self.digest_frequency.findData(str(email.get('digest_frequency', 'daily')))
+        self.digest_frequency.setCurrentIndex(max(0, index))
+        self.digest_weekday = QComboBox()
+        for value, name in enumerate(WEEKDAY_NAMES):
+            self.digest_weekday.addItem(name, value)
+        self.digest_weekday.setCurrentIndex(max(0, _whole_number(email.get('digest_weekday'), 0)) % 7)
+        self.digest_interval = QSpinBox()
+        self.digest_interval.setRange(MIN_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL)
+        self.digest_interval.setSuffix(' 天')
+        self.digest_interval.setValue(max(MIN_DIGEST_INTERVAL,
+                                          min(MAX_DIGEST_INTERVAL, _whole_number(email.get('digest_interval'),
+                                                                                 DEFAULT_DIGEST_INTERVAL))))
+        cadence_row = QWidget()
+        cadence = QHBoxLayout(cadence_row)
+        cadence.setContentsMargins(0, 0, 0, 0)
+        cadence.setSpacing(6)
+        cadence.addWidget(self.digest_frequency)
+        cadence.addWidget(self.digest_weekday)
+        cadence.addWidget(self.digest_interval)
+        cadence.addStretch()
         form.addRow('接收提醒的邮箱', self.recipient)
-        form.addRow('每日发信时刻', self.digest)
+        form.addRow('汇总发信时刻', self.digest)
+        form.addRow('汇总频率', cadence_row)
         layout.addLayout(form)
-        self.digest_hint = QLabel('到点发一封汇总邮件，列出所有未截止作业；与“提前提醒”互不影响，两种邮件都会发。')
+        self.digest_hint = QLabel()
         self.digest_hint.setObjectName('muted'); self.digest_hint.setWordWrap(True)
         layout.addWidget(self.digest_hint)
+        self.digest_frequency.currentIndexChanged.connect(self.refresh_digest_hint)
+        self.digest_weekday.currentIndexChanged.connect(self.refresh_digest_hint)
+        self.digest_interval.valueChanged.connect(self.refresh_digest_hint)
+        self.refresh_digest_hint()
         # Who the mail comes from is a choice, made explicitly: the shipped
         # address by default, or the user's own mailbox. It used to hide behind
         # an "advanced options" checkbox, which read as a power-user switch
@@ -264,12 +307,31 @@ class EmailSettingsForm(QWidget):
     def suggested_servers():
         return {preset['server'] for preset in emailer.PRESETS.values()}
 
+    def cadence_values(self):
+        """The chosen summary cadence as (frequency, weekday, interval)."""
+        frequency = str(self.digest_frequency.currentData() or 'daily')
+        weekday = _whole_number(self.digest_weekday.currentData(), 0) % 7
+        return frequency, weekday, int(self.digest_interval.value())
+
+    def refresh_digest_hint(self):
+        """Say when the next summary arrives, and hide the parts that do not apply."""
+        frequency, weekday, interval = self.cadence_values()
+        self.digest_weekday.setVisible(frequency == 'weekly')
+        self.digest_interval.setVisible(frequency == 'interval')
+        when = next_digest_day(now_beijing(), frequency, weekday, interval)
+        late = '' if frequency == 'daily' else '那天没开机的话，下次启动时会补发一次。'
+        self.digest_hint.setText(
+            f'{digest_cadence_text(frequency, weekday, interval)}发一封汇总邮件，列出所有未截止作业'
+            f'（下次 {when.strftime("%m月%d日")}）；与“提前提醒”互不影响，两种邮件都会发。{late}')
+
     def values(self):
         """Return the settings patch; omit the code unless the user typed one."""
+        frequency, weekday, interval = self.cadence_values()
         config = dict(enabled=self.enabled.isChecked(), recipient=self.recipient.text().strip(),
                       advanced=self.custom.isChecked(),
                       sender=self.sender.text().strip(), server=self.server.text().strip(),
                       port=self.port.value(), security=self.security.currentData(),
+                      digest_frequency=frequency, digest_weekday=weekday, digest_interval=interval,
                       digest_times=[part.strip() for part in self.digest.text().replace('，', ',').split(',') if part.strip()])
         if self.password.text() or self.forget_password:
             config['password'] = self.password.text()
