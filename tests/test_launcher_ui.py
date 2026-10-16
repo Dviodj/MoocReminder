@@ -44,6 +44,19 @@ class LauncherTests(unittest.TestCase):
         args, _ = self.ui.parse_args(['--smoke-report', 'ui.json'])
         self.assertIs(self.ui.select_runner(args), self.ui.preview_runner)
 
+    def test_the_preview_runner_accepts_every_argument_the_worker_passes(self):
+        """--preview must not die on a keyword the worker always sends.
+
+        The worker calls its runner with `confirm`, but the preview runner was
+        written before that argument existed.  Nothing caught it because every
+        other test injects a runner that swallows `**kwargs`.
+        """
+        worker = self.ui.StartupWorker(ROOT, [], runner=self.ui.preview_runner)
+        worker._run()
+        events = worker.drain()
+        self.assertEqual([e['kind'] for e in events], ['progress', 'progress', 'progress', 'success'],
+                         'preview runner failed: %r' % (events,))
+
     def test_arguments_forward_full_app_smoke(self):
         args, forwarded = self.ui.parse_args(['--app-smoke-report', 'report.json', '--wait', '--other'])
         self.assertTrue(args.wait)

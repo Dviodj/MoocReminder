@@ -98,7 +98,10 @@ def parse_args(argv=None):
     return args, forwarded
 
 
-def preview_runner(workspace, args, wait=False, progress=None, cancelled=None):
+def preview_runner(workspace, args, wait=False, progress=None, cancelled=None,
+                   confirm=None):
+    # `confirm` is accepted and ignored: the worker always passes it, and a
+    # preview must never block on a prompt.
     for phase, detail, percent, unknown in [
         ('检查运行环境', '正在确认本机可用的 Python 环境', 12, False),
         ('准备桌面组件', '首次启动时将自动安装所需组件', 42, True),
