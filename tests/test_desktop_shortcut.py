@@ -136,6 +136,34 @@ class ShortcutTests(unittest.TestCase):
             self.assertEqual(Path(read_link(link)['target']), new('pythonw.exe'))
             self.assertTrue(desktop_shortcut_ready(workspace, new(), desktop))
 
+    def test_a_shortcut_made_before_a_new_icon_is_rewritten_once(self):
+        # The link stores the icon's *path*, so a shortcut built for the
+        # previous picture still looks correct and the desktop keeps showing
+        # what Explorer cached.  Rewriting the link is what makes the new icon
+        # appear, and it must happen exactly once per new icon.
+        with tempfile.TemporaryDirectory() as folder:
+            workspace = make_workspace(folder)
+            desktop = Path(folder)/'Desktop'; desktop.mkdir()
+            interpreter = FakePython(Path(folder)/'runtime')
+            icon = workspace/'assets'/'MoocReminder.ico'
+            create_desktop_shortcut(workspace, python=interpreter(), desktop=desktop)
+            cache = workspace/'.launcher-state'/'shortcut.json'
+            first = json.loads(cache.read_text(encoding='utf-8'))
+            self.assertEqual(first['icon_stamp'], icon.stat().st_mtime_ns)
+
+            icon.write_bytes(icon.read_bytes() + b'\x00')
+            stamp = icon.stat().st_mtime_ns
+            os.utime(icon, ns=(stamp, stamp + 2_000_000_000))
+            create_desktop_shortcut(workspace, python=interpreter(), desktop=desktop)
+            second = json.loads(cache.read_text(encoding='utf-8'))
+            self.assertGreater(second['written'], first['written'])
+            self.assertEqual(second['icon_stamp'], icon.stat().st_mtime_ns)
+
+            # Settled: the next launch must not rewrite the link again.
+            create_desktop_shortcut(workspace, python=interpreter(), desktop=desktop)
+            self.assertEqual(json.loads(cache.read_text(encoding='utf-8'))['written'],
+                             second['written'])
+
     def test_a_shortcut_pointing_elsewhere_is_repaired_not_trusted(self):
         with tempfile.TemporaryDirectory() as folder:
             workspace = make_workspace(folder)

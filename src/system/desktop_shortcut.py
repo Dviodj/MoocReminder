@@ -272,6 +272,28 @@ def _unquote(text):
     return (text or '').replace('"', '').replace('\\\\', '\\').lower()
 
 
+def _cache_path(workspace):
+    """Where the last shortcut we wrote is described."""
+    return Path(workspace)/'.launcher-state'/'shortcut.json'
+
+
+def icon_stamp_changed(workspace, expected):
+    """Whether the link was written for an older picture than the one on disk.
+
+    A shortcut stores the icon's *path*, so replacing the picture inside
+    ``MoocReminder.ico`` leaves every existing link looking perfectly correct
+    while the desktop keeps showing the artwork Explorer cached.  The stamp
+    recorded when the link was written is what tells the two apart.  No record
+    means nothing of ours to compare against, and a missing key means the
+    record predates the stamp: repairing once is cheap and then settles.
+    """
+    try:
+        recorded = json.loads(_cache_path(workspace).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return recorded.get('icon_stamp') != expected.get('icon_stamp')
+
+
 def _matches(link, expected):
     current = read_link(link)
     if not current:
@@ -359,8 +381,8 @@ def create_shortcut(workspace, python=None, folder=None, extra=(), cancelled=lam
     expected = shortcut_state(workspace, python, folder, extra)
     link = expected['link']
     state=workspace/'.launcher-state';state.mkdir(parents=True,exist_ok=True)
-    cache=state/'shortcut.json'
-    if not force and _matches(link, expected):
+    cache=_cache_path(workspace)
+    if not force and _matches(link, expected) and not icon_stamp_changed(workspace, expected):
         return link
     if cancelled():
         raise InterruptedError('启动已取消')
@@ -396,7 +418,7 @@ def remove_shortcut(workspace, folder=None, label='快捷方式'):
     if not owns_shortcut(workspace, folder):
         raise RuntimeError('同名' + label + '不属于本程序，未删除。')
     link.unlink()
-    cache = workspace/'.launcher-state/shortcut.json'
+    cache = _cache_path(workspace)
     try:
         cache.unlink(missing_ok=True)
     except OSError:
