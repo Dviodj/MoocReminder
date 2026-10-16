@@ -1,3 +1,5 @@
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+
 import json
 from pathlib import Path
 import tempfile

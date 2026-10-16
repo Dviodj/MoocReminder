@@ -17,6 +17,7 @@ import queue
 import threading
 
 import secrets_store
+import paths
 
 # Token replaced by the calling layer when it renders an item list.
 DEFAULT_PORT = 465
@@ -51,7 +52,7 @@ def load_sender(folder=None, refresh=False):
     Cached per folder because this is consulted on every send and never changes
     while the program runs; `refresh` forces a re-read (used by tests).
     """
-    path = (Path(folder) if folder else Path(__file__).resolve().parent)/SENDER_FILE
+    path = (Path(folder) if folder else paths.PROGRAM_ROOT)/SENDER_FILE
     key = str(path)
     if not refresh and key in _sender_cache:
         return _sender_cache[key]

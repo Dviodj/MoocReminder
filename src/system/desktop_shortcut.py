@@ -28,6 +28,8 @@ import subprocess
 import time
 import uuid
 
+import paths
+
 LINK_NAME = 'MoocReminder.lnk'
 DESCRIPTION = 'MoocReminder - MOOC assignment reminders'
 #: Passed to the Startup copy only, so signing in lands in the tray instead of
@@ -89,7 +91,7 @@ def launch_target(workspace, python, extra=()):
     # shortcut: python.exe is only worse in that it flashes a console.
     if not gui.is_file():
         gui = Path(python).resolve()
-    return gui, [str(workspace/'source_launcher.py'), '--workspace', str(workspace), *extra]
+    return gui, [str(paths.launcher_script(workspace)), '--workspace', str(workspace), *extra]
 
 
 
@@ -288,7 +290,7 @@ def _matches(link, expected):
     # The script lives inside the workspace, so its presence already proves the
     # arguments point at this project and not another folder.
     arguments = _unquote(current.get('arguments',''))
-    script = _unquote(str(Path(expected['workspace'])/'source_launcher.py'))
+    script = _unquote(str(paths.launcher_script(expected['workspace'])))
     if script not in arguments:
         return False
     # Extra arguments are not rewritten by Windows, so they can be checked
@@ -333,7 +335,7 @@ def owns_shortcut(workspace, folder=None):
         description = (current.get('description') or '')
         if description.startswith('MoocReminder'):
             return True
-        script = str(workspace / 'source_launcher.py')
+        script = str(paths.launcher_script(workspace))
         return _unquote(script) in _unquote(current.get('arguments') or '')
     except (OSError, ValueError):
         return False
@@ -350,7 +352,7 @@ def create_shortcut(workspace, python=None, folder=None, extra=(), cancelled=lam
     if cancelled():
         raise InterruptedError('启动已取消')
     workspace=Path(workspace).resolve()
-    if not (workspace/'source_launcher.py').is_file():
+    if not paths.launcher_script(workspace).is_file():
         raise RuntimeError('缺少快捷方式启动入口。')
     python = Path(python) if python else Path(os.sys.executable)
     extra = tuple(extra)
@@ -363,7 +365,7 @@ def create_shortcut(workspace, python=None, folder=None, extra=(), cancelled=lam
     if cancelled():
         raise InterruptedError('启动已取消')
     reason = _write_link(link, expected['target'],
-        [str(workspace/'source_launcher.py'), '--workspace', str(workspace), *extra],
+        [str(paths.launcher_script(workspace)), '--workspace', str(workspace), *extra],
         workspace, workspace/'assets/MoocReminder.ico')
     deadline = time.monotonic() + 12
     while reason is None and not link.is_file() and time.monotonic() < deadline:

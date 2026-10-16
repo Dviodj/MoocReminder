@@ -10,6 +10,7 @@ import uuid
 
 from core import Assignment, DEFAULT_SETTINGS, account_id, binding_state, now_beijing, valid_home_url
 import emailer
+import paths
 import secrets_store
 
 
@@ -29,7 +30,7 @@ def default_data_dir(portable_base=None):
         return candidate
     except OSError:
         if portable_base is None:
-            portable_base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+            portable_base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else paths.PROGRAM_ROOT
         return Path(portable_base) / 'data'
 
 

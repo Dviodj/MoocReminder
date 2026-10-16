@@ -1,3 +1,6 @@
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+from _bootstrap import entry
+
 import json
 from pathlib import Path
 import tempfile
@@ -34,7 +37,7 @@ class LauncherRuntimeTests(unittest.TestCase):
     def fixture(self, root):
         python = root/'.venv/Scripts/python.exe'
         artifacts = [python, root/'.venv/pyvenv.cfg', root/'requirements-runtime.txt',
-            root/'qt_bootstrap.py',
+            entry('src/system/qt_bootstrap.py', root),
             root/'.venv/Lib/site-packages/PySide6/QtCore.pyd',
             root/'.venv/Lib/site-packages/PySide6/QtWidgets.pyd',
             root/'.venv/Lib/site-packages/PySide6/QtWebEngineCore.pyd',

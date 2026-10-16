@@ -43,7 +43,7 @@ If probeOnly Then
     WScript.Quit 0
 End If
 On Error Resume Next
-code = shell.Run(Quote(python) & " " & Quote(fso.BuildPath(folder, "launcher_ui.py")), 0, False)
+code = shell.Run(Quote(python) & " " & Quote(fso.BuildPath(folder, "src\ui\launcher_ui.py")), 0, False)
 If Err.Number <> 0 Then
     MsgBox "Unable to open MoocReminder startup window: " & Err.Description, 16, "MoocReminder"
     WScript.Quit 1

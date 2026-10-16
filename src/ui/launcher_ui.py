@@ -4,10 +4,15 @@ import json
 import os
 from pathlib import Path
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+# This file lives in src/ui/, so the folder holding paths.py is one level up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import paths
 
 
 class StartupWorker:
@@ -87,7 +92,7 @@ class StartupWorker:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='MoocReminder startup window')
-    parser.add_argument('--workspace', default=str(Path(__file__).resolve().parent))
+    parser.add_argument('--workspace', default=str(paths.PROGRAM_ROOT))
     parser.add_argument('--preview', action='store_true')
     parser.add_argument('--smoke-report')
     parser.add_argument('--app-smoke-report')

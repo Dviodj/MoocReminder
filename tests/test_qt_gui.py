@@ -1,4 +1,6 @@
 """Verify displayed scan updates on the actual desktop widgets."""
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 import gc
 import os
 from pathlib import Path

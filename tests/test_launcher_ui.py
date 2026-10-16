@@ -3,12 +3,15 @@ import pathlib
 import threading
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+import _bootstrap
+from _bootstrap import PROGRAM_ROOT as ROOT, STARTUP_UI_RELATIVE
+
+UI = ROOT / STARTUP_UI_RELATIVE
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
-        self.assertTrue((ROOT / 'launcher_ui.py').exists(), 'startup UI implementation missing')
-        spec = importlib.util.spec_from_file_location('launcher_ui', ROOT / 'launcher_ui.py')
+        self.assertTrue(UI.exists(), 'startup UI implementation missing')
+        spec = importlib.util.spec_from_file_location('launcher_ui', UI)
         self.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.ui)
 
@@ -100,7 +103,7 @@ if __name__ == '__main__':
 
 class WindowTests(unittest.TestCase):
     def setUp(self):
-        spec = importlib.util.spec_from_file_location('launcher_ui_window', ROOT / 'launcher_ui.py')
+        spec = importlib.util.spec_from_file_location('launcher_ui_window', UI)
         self.ui = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.ui)
         self.root = self.ui.tk.Tk()
     def tearDown(self):

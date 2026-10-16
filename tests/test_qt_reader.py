@@ -1,4 +1,6 @@
 """Reader boundary checks; no account or external browser is used."""
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 from pathlib import Path
 from types import SimpleNamespace
 import threading

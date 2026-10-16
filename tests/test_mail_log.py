@@ -4,6 +4,8 @@
 checks that they are turned into readable rows, that the retry counters never
 leak into the list, and that a log written by an older version still renders.
 """
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 import unittest
 
 from mail_log import entries, summary

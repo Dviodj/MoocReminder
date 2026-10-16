@@ -13,6 +13,7 @@ from storage import normalize_email_settings
 from worker import BrowserWorker
 
 import emailer
+import paths
 
 
 class Controller:
@@ -26,7 +27,7 @@ class Controller:
         # The shipped sender settings live next to the program, not in the data
         # folder, so a user only has to give their own address.
         self.mailer = emailer.Mailer(log=self.log_email, on_result=self.record_email,
-                                     folder=Path(__file__).parent)
+                                     folder=paths.PROGRAM_ROOT)
         self.mailer.start()
         self.email_message = ''
         self.busy = False
@@ -218,7 +219,7 @@ class Controller:
         if not config.get('enabled') or not str(config.get('recipient', '')).strip():
             raise ValueError('请先填写接收提醒的邮箱并启用邮件提醒。')
         # A credential the user stored, or the one shipped with the program.
-        if not emailer.resolve_password(config, Path(__file__).parent):
+        if not emailer.resolve_password(config, paths.PROGRAM_ROOT):
             raise ValueError('邮件发送账号尚未配置，请在高级选项里填写邮箱授权码。')
         now = now_beijing()
         mail = emailer.Mail(subject='【测试】MoocReminder 邮件提醒已连接',
@@ -302,8 +303,8 @@ class Controller:
             if email['enabled']:
                 try:
                     # The shipped sender settings fill in whatever the user left blank.
-                    emailer.validate(email, emailer.resolve_password(email, Path(__file__).parent),
-                                     Path(__file__).parent)
+                    emailer.validate(email, emailer.resolve_password(email, paths.PROGRAM_ROOT),
+                                     paths.PROGRAM_ROOT)
                 except emailer.EmailError as exc:
                     # Keep what the user typed so it can be corrected, but never
                     # leave a reminder switched on that cannot be delivered.

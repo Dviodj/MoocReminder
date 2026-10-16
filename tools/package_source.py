@@ -3,10 +3,15 @@ from pathlib import Path
 import argparse
 import json
 import subprocess
+import sys
 import zipfile
+
+# This file lives in tools/, so the folder holding paths.py is one level up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+import paths
 from version import APP_NAME, VERSION
 
-ROOT = Path(__file__).resolve().parent
+ROOT = paths.PROGRAM_ROOT
 
 # Text of the Qt licenses the bundled PySide6 and shiboken6 are used under.
 # Their official wheels ship only LicenseRef-Qt-Commercial.txt, so LGPL-3.0

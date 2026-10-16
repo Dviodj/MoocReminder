@@ -1,4 +1,8 @@
 """Exercise the source launcher with a real incompatible Windows runtime."""
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+from _bootstrap import launcher_entry
+
 import json
 import os
 from pathlib import Path
@@ -10,7 +14,8 @@ import source_launcher
 import sys
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = _bootstrap.PROGRAM_ROOT
+LAUNCHER = launcher_entry()
 MODERN = Path('D:/Software/anaconda/python.exe')
 LEGACY = Path('D:/vs2/Python39_64/python.exe')
 
@@ -36,7 +41,7 @@ class StartupTests(unittest.TestCase):
             old = subprocess.run([str(LEGACY), '-m', 'venv', '--without-pip', str(Path(folder)/'.venv')], capture_output=True)
             self.assertEqual(old.returncode, 0)
             env = dict(os.environ, MOOC_PYTHON=str(MODERN))
-            result = subprocess.run([str(LEGACY), str(ROOT/'source_launcher.py'), '--check-runtime', '--workspace', folder], env=env, capture_output=True, text=True, encoding='utf-8', timeout=15)
+            result = subprocess.run([str(LEGACY), str(LAUNCHER), '--check-runtime', '--workspace', folder], env=env, capture_output=True, text=True, encoding='utf-8', timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(Path(report['python']).resolve(), MODERN.resolve())
@@ -44,7 +49,7 @@ class StartupTests(unittest.TestCase):
             self.assertGreaterEqual(tuple(report['version'][:2]), (3,10))
 
     def test_incompatible_runtime_probe_is_rejected(self):
-        result = subprocess.run([str(MODERN), str(ROOT/'source_launcher.py'), '--probe-python', str(LEGACY)], capture_output=True, text=True, encoding='utf-8', timeout=10)
+        result = subprocess.run([str(MODERN), str(LAUNCHER), '--probe-python', str(LEGACY)], capture_output=True, text=True, encoding='utf-8', timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)['supported'], False)
 

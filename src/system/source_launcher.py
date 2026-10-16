@@ -12,6 +12,11 @@ import sys
 import tempfile
 import time
 import uuid
+
+# This file lives in src/system/, so the folder holding paths.py is one level up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import paths
+
 from desktop_shortcut import (BACKGROUND_ARGUMENT, create_desktop_shortcut,
     desktop_shortcut_ready, owns_shortcut, remove_desktop_shortcut)
 import autostart
@@ -202,12 +207,13 @@ def cache_fingerprint(workspace, python):
     bundle = artifact_root(workspace, 'runtime-bundle')
     site = bundle/'common' if (bundle/'bundle.json').is_file() else prefix/'Lib/site-packages'
     required = [python, workspace/'requirements-runtime.txt',
-        workspace/'qt_bootstrap.py', site/'PySide6/QtCore.pyd', site/'PySide6/QtWidgets.pyd',
+        paths.script('src/system/qt_bootstrap.py', workspace), site/'PySide6/QtCore.pyd',
+        site/'PySide6/QtWidgets.pyd',
         site/'PySide6/QtWebEngineCore.pyd', site/'PySide6/QtWebEngineWidgets.pyd',
         site/'PySide6/QtWebEngineProcess.exe']
     try:
         stamps = [(str(file.resolve()), file.stat().st_size, file.stat().st_mtime_ns) for file in required]
-        optional = [prefix/'pyvenv.cfg', workspace/'source_launcher.py',bundle/'bundle.json']
+        optional = [prefix/'pyvenv.cfg', paths.launcher_script(workspace), bundle/'bundle.json']
         optional += list(site.glob('pyside6_essentials-*.dist-info/METADATA'))
         optional += list(site.glob('pyside6_webengine-*.dist-info/METADATA'))
         stamps += [(str(file.resolve()), file.stat().st_size, file.stat().st_mtime_ns) for file in optional if file.exists()]
@@ -228,7 +234,8 @@ def probe_app_runtime(python, workspace, cancelled=None):
                 name, version = line.strip().split('==',1)
                 expected[name] = version
         code = ('import sys,struct,json,importlib.metadata as m; '
-            'from qt_bootstrap import prepare_qt; prepare_qt("data"); '
+            + paths.bootstrap_code() +
+            'from qt_bootstrap import prepare_qt; prepare_qt(' + repr(str(Path(workspace)/'data')) + '); '
             'from PySide6 import QtCore,QtWidgets,QtWebEngineCore,QtWebEngineWidgets; '
             'print(json.dumps(dict(version=list(sys.version_info[:3]),bits=struct.calcsize("P")*8,'
             'base_python=getattr(sys,"_base_executable",sys.executable),deps={n:m.version(n) for n in '+repr(list(expected))+'})))')
@@ -404,7 +411,8 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None, con
         info = plan.get('app_info',plan)
         (state/'runtime.json').write_text(json.dumps({'python':str(Path(info['base_python']).resolve()),'app_python':str(python)}), encoding='utf-8')
         expected = dict(line.strip().split('==',1) for line in (workspace/'requirements-runtime.txt').read_text(encoding='utf-8-sig').splitlines() if '==' in line and not line.startswith('#')) if (workspace/'requirements-runtime.txt').exists() else {}
-        check = ('from qt_bootstrap import prepare_qt; prepare_qt("data"); '
+        check = (paths.bootstrap_code() +
+            'from qt_bootstrap import prepare_qt; prepare_qt(' + repr(str(Path(workspace)/'data')) + '); '
             'from PySide6 import QtCore,QtWidgets,QtWebEngineCore,QtWebEngineWidgets; '
             'import importlib.metadata as m; assert {n:m.version(n) for n in '+repr(list(expected))+'} == '+repr(expected))
         if not warm and (not reused or bundle_env) and run_command([python,'-c',check],workspace,log,cancelled,timeout=25,env=bundle_env or preparation_env):
@@ -465,7 +473,7 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None, con
         gui_python = python.with_name('pythonw.exe')
         env = dict(bundle_env or os.environ, PYTHONIOENCODING='utf-8')
         env.pop('__PYVENV_LAUNCHER__', None)
-        process = subprocess.Popen([str(gui_python), str(workspace/'qt_desktop.py'), '--startup-report', str(ready)]+app_args,
+        process = subprocess.Popen([str(gui_python), str(paths.gui_script(workspace)), '--startup-report', str(ready)]+app_args,
             cwd=workspace, env=env, stdout=log, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
@@ -520,7 +528,7 @@ def _run_app(workspace, app_args, wait=False, progress=None, cancelled=None, con
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--workspace', default=str(Path(__file__).resolve().parent))
+    parser.add_argument('--workspace', default=str(paths.PROGRAM_ROOT))
     parser.add_argument('--check-runtime', action='store_true')
     parser.add_argument('--probe-python')
     parser.add_argument('--wait', action='store_true')

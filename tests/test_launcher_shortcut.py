@@ -5,6 +5,10 @@ where the resolved interpreter and the ownership check meet -- was only ever
 covered by hand.  This drives `source_launcher.run_app` with the real shortcut
 functions and a redirected desktop.
 """
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+from _bootstrap import stub_launcher
+
 import base64
 from pathlib import Path
 import subprocess
@@ -24,7 +28,7 @@ def make_install(folder):
     """A folder shaped like a real install, so the shortcut writer accepts it."""
     install = Path(folder)/'install'
     (install/'assets').mkdir(parents=True)
-    (install/'source_launcher.py').write_text('# stub', encoding='utf-8')
+    stub_launcher(install)
     (install/'assets'/'MoocReminder.ico').write_bytes(b'\x00\x00\x01\x00\x00\x00')
     # application_runtime returns <install>/.venv/Scripts/python.exe when the
     # plan reports venv_ready, so the fake install needs one.

@@ -74,7 +74,7 @@
 - 侧栏的 **当前账号** 可以随时切换账号，或选择「添加账号…」再建一个。切换后立即恢复该账号上次的内容，**不用重新登录慕课**。
 - 新账号默认沿用当前账号的邮箱与授权码，不用重填；慕课绑定需要各自填写。
 
-以后若要把账号放到服务器上（跨设备登录、关机也能收到提醒），账号数据层已经独立成 `profiles.py`，可以替换实现而不改界面。
+以后若要把账号放到服务器上（跨设备登录、关机也能收到提醒），账号数据层已经独立成 `src/domain/profiles.py`，可以替换实现而不改界面。
 
 ### 邮件提醒
 
@@ -117,7 +117,9 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| 根目录 `*.py` | 启动器、主界面、读取逻辑与打包脚本，全部扁平放置 |
+| `src/` | 全部源码，按职责分在 `domain/`（规则与数据）、`mail/`（邮件提醒）、`web/`（浏览器）、`ui/`（界面）、`system/`（启动与环境）里 |
+| `tools/` | 发布者用的构建脚本（生成便携包与 ZIP），用户运行不到 |
+| `启动MoocReminder.bat`、`launch.bat`、`launch.vbs` | 启动脚本，留在根目录方便双击 |
 | `assets/`、`docs/`、`tests/` | 图标、验证记录与结构说明、自动测试 |
 | `LICENSE`、`THIRD-PARTY-NOTICES.md`、`licenses/` | 本项目 MIT 许可证、随包第三方组件声明、Qt 的 LGPL/GPL 正文 |
 | `.launcher-state/` | 本机启动日志与运行缓存，按已发布离线包的布局保留在根目录 |
@@ -135,9 +137,9 @@ python -m venv .venv
 
 开发环境约 760 MB（QtWebEngine 占大部分）。`test_site` 与 `test_qt_reader` 会真实渲染页面，请在有图形界面的 Windows 会话运行，不需要联网。
 
-当前开发状态为 **283 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。桌面快捷方式与开机自启动相关的测试需要 Windows 与 PowerShell。v0.1.1 发布时通过 83 项。
+当前开发状态为 **284 项通过**（`python -m unittest discover -s tests`）。复现完整数量需要 64 位 Python 3.11–3.15 并安装 `requirements.txt`：缺少 `PySide6-WebEngine` 时 `test_qt_reader` 与 `test_site` 会导入失败（该模块由 Qt 单独分发，不在 Essentials 或 Addons 内）。桌面快捷方式与开机自启动相关的测试需要 Windows 与 PowerShell。v0.1.1 发布时通过 83 项。
 
-发布者制作便携包：先运行 `python bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。真实的“连接慕课”按钮需要人工验证时，直接运行程序点一次即可。
+发布者制作便携包：先运行 `python tools/bundle_runtime.py` 生成内置 Python 与 Qt 组件，再运行 `python tools/package_source.py --with-runtime` 打出 ZIP。普通用户无需执行构建步骤。真实的“连接慕课”按钮需要人工验证时，直接运行程序点一次即可。
 
 课程读取依赖官网当前页面结构。登录失效或网站结构变化时，程序会显示错误并保留缓存。
 

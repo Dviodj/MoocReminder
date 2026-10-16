@@ -1,3 +1,6 @@
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+from _bootstrap import launcher_entry, stub_launcher
+
 import subprocess
 import tempfile
 import unittest
@@ -14,7 +17,7 @@ from desktop_shortcut import read_link
 def make_workspace(root, name="O'Brien app"):
     workspace = Path(root)/name
     (workspace/'assets').mkdir(parents=True)
-    (workspace/'source_launcher.py').write_text('# stub', encoding='utf-8')
+    stub_launcher(workspace)
     (workspace/'assets'/'MoocReminder.ico').write_bytes(b'\x00\x00\x01\x00\x00\x00')
     return workspace
 
@@ -79,7 +82,7 @@ class AutostartTests(unittest.TestCase):
             # Without this the window would pop up over whatever the user was
             # doing every time they signed in.
             self.assertIn(autostart.BACKGROUND_ARGUMENT, fields['arguments'])
-            self.assertIn('source_launcher.py', fields['arguments'])
+            self.assertIn(str(launcher_entry(workspace)), fields['arguments'])
             self.assertEqual(Path(fields['target']).name.lower(), 'pythonw.exe')
 
     def test_enabled_follows_the_entry_being_created_and_removed(self):

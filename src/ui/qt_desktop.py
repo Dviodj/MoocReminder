@@ -9,11 +9,15 @@ import sys
 import threading
 import time
 
+# This file lives in src/ui/, so the folder holding paths.py is one level up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import paths
+
 from storage import Store
 from version import APP_NAME, VERSION
 from qt_bootstrap import prepare_qt
 
-_data = Path(__file__).parent / 'data'
+_data = paths.data_dir()
 prepare_qt(_data)
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -355,7 +359,7 @@ class LockScreen(QDialog):
         self.key = None
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle(f'{APP_NAME} · 登录')
-        self.setWindowIcon(QIcon(str(Path(__file__).parent/'assets/MoocReminder.ico')))
+        self.setWindowIcon(QIcon(str(paths.icon_path())))
         self.setStyleSheet(STYLE)
         self.setFixedWidth(470)
         outer = QVBoxLayout(self)
@@ -449,7 +453,7 @@ class Tray(QSystemTrayIcon):
     """
 
     def __init__(self, window):
-        icon = Path(__file__).parent/'assets/MoocReminder.ico'
+        icon = paths.icon_path()
         super().__init__(QIcon(str(icon)) if icon.exists() else QIcon(), window)
         self.window = window
         menu = QMenu()
@@ -497,7 +501,7 @@ class Window(QMainWindow):
         super().__init__()
         self.store = store
         self.profiles = profiles or profiles_module.Profiles(profiles_module.folder_for_store(store.folder))
-        self.workspace = Path(__file__).resolve().parent
+        self.workspace = paths.PROGRAM_ROOT
         self._email_dialog = None
         self.tray = None
         self.quitting = False
@@ -508,7 +512,7 @@ class Window(QMainWindow):
         self.controller = Controller(store, context_provider=self.manager.context, profile_dir='web-profiles')
         self.manager.on_error = lambda message: self.controller.events.put(('error', message))
         self.setWindowTitle(f'{APP_NAME} · 作业提醒 {VERSION}')
-        self.setWindowIcon(QIcon(str(Path(__file__).parent/'assets/MoocReminder.ico')))
+        self.setWindowIcon(QIcon(str(paths.icon_path())))
         self.resize(1260, 850)
         self.setMinimumSize(1020, 670)
         self.setStyleSheet(STYLE)

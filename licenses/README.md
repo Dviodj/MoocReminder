@@ -1,6 +1,6 @@
 # 许可证正文来源
 
-本目录存放随附第三方组件的许可证**正文**。它们按项目 `package_source.py` 的规则进入
+本目录存放随附第三方组件的许可证**正文**。它们按项目 `tools/package_source.py` 的规则进入
 离线发布包，覆盖包内的 PySide6 与 shiboken6。其余组件的许可证正文由各自的
 `.dist-info/licenses/` 目录提供，无需在此重复。
 

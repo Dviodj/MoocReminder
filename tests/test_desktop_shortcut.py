@@ -1,3 +1,6 @@
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
+from _bootstrap import launcher_entry, stub_launcher
+
 import json
 import os
 from pathlib import Path
@@ -18,7 +21,7 @@ PNG = (b'\x89PNG\r\n\x1a\n' + b'\x00' * 32)
 def make_workspace(root):
     workspace = Path(root)/'O\'Brien app'
     (workspace/'assets').mkdir(parents=True)
-    (workspace/'source_launcher.py').write_text('# stub', encoding='utf-8')
+    stub_launcher(workspace)
     # A real ICO header (0 images is legal enough for WScript.Shell to record).
     (workspace/'assets'/'MoocReminder.ico').write_bytes(
         b'\x00\x00\x01\x00\x00\x00')
@@ -59,7 +62,7 @@ class ShortcutTests(unittest.TestCase):
             # wscript.exe is what made the icon and the move-repair impossible.
             self.assertEqual(target.name.lower(), 'pythonw.exe')
             self.assertEqual(Path(target).parent, Path(python).parent)
-            self.assertIn(str(workspace/'source_launcher.py'), arguments)
+            self.assertIn(str(launcher_entry(workspace)), arguments)
             self.assertIn(str(workspace), arguments)
 
     def test_target_falls_back_when_pythonw_is_absent(self):
@@ -81,7 +84,7 @@ class ShortcutTests(unittest.TestCase):
             info = read_link(link)
             self.assertEqual(Path(info['target']).name.lower(), 'pythonw.exe')
             self.assertEqual(Path(info['cwd']), workspace)
-            self.assertIn(str(workspace/'source_launcher.py'), info['arguments'])
+            self.assertIn(str(launcher_entry(workspace)), info['arguments'])
             self.assertTrue(info['description'].startswith('MoocReminder'))
             self.assertIn('MoocReminder.ico', info['icon'])
 
@@ -113,7 +116,7 @@ class ShortcutTests(unittest.TestCase):
             link = create_desktop_shortcut(moved, python=python, desktop=desktop)
             info = read_link(link)
             self.assertEqual(Path(info['cwd']), moved)
-            self.assertIn(str(moved/'source_launcher.py'), info['arguments'])
+            self.assertIn(str(launcher_entry(moved)), info['arguments'])
             self.assertNotIn(str(workspace), info['arguments'])
             self.assertTrue(desktop_shortcut_ready(moved, python, desktop))
 

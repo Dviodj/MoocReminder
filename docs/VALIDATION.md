@@ -50,7 +50,7 @@
 ### 下载文件的“来自网络”标记
 
 - 已实测确认：合并后的 `启动MoocReminder.bat` 能清除标记并启动。在一个带中文与空格的临时目录中，给 3 个文件打上标记后模拟双击：标记数 3 → 0，且 `launch.vbs` 被正常调用。
-- 带参数的诊断路径同样实测通过：`启动MoocReminder.bat --check-runtime` 能把参数交给 `source_launcher.py`。
+- 带参数的诊断路径同样实测通过：`启动MoocReminder.bat --check-runtime` 能把参数交给 `src/system/source_launcher.py`。
 - 未能在本会话实测：由 Python 通过子进程调用 `Unblock-File`。因此该逻辑改由批处理在真实脚本宿主中执行，Python 侧只做检测提示。
   - 更正：此处最初归因为「子进程调用方式受限」，实际原因是**本会话的子进程写不了用户桌面**（沙箱 ACL 只给 `CodexSandboxUsers` 读权限）。同一脚本在外层 PowerShell 里成功，是因为外层进程不受该 ACL 限制。真实用户的进程不受此限。
 - 检测会漏报文件名含非 ASCII 字符的文件（PowerShell 输出经子进程的编码问题）；解除不受影响。
@@ -89,7 +89,7 @@
 ### 开机自启动
 
 - 启动项写在 Windows 的「启动」文件夹（`FOLDERID_Startup`），内容与桌面快捷方式同构，
-  只是多带一个 `--background`。桌面与启动文件夹因此共用 `desktop_shortcut.py` 的同一套读写与校验代码。
+  只是多带一个 `--background`。桌面与启动文件夹因此共用 `src/system/desktop_shortcut.py` 的同一套读写与校验代码。
 - 已实测（把启动文件夹指向临时目录）：条目落在启动文件夹、参数带 `--background`、目标为 `pythonw.exe`；
   项目改名或换运行时目录后 `ready` 变假而 `enabled` 仍为真，重新写入后恢复正常且仍只有一个 `.lnk`；
   启动文件夹里有其他程序的同名条目时既不覆盖也不删除。

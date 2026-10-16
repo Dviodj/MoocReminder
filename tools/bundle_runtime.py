@@ -14,11 +14,16 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import shutil
+import sys
 import tempfile
 import urllib.request
 import zipfile
 
-ROOT = Path(__file__).resolve().parent
+# This file lives in tools/, so the folder holding paths.py is one level up.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+import paths
+
+ROOT = paths.PROGRAM_ROOT
 PYTHON_VERSION = '3.13.9'
 PYTHON_URL = f'https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-amd64.zip'
 # PySide6-Addons is required even though the program never imports it: Qt's own

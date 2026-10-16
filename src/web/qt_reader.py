@@ -17,6 +17,8 @@ from PySide6.QtWidgets import QMainWindow, QLineEdit, QVBoxLayout, QWidget, QLab
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineLoadingInfo
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
+import paths
+
 
 def windows_job_info():
     if os.name != 'nt':
@@ -120,7 +122,7 @@ class Manager(QObject):
         self.record('manager_started', qt=qVersion(), **windows_job_info())
 
     def record(self, event, **data):
-        path = Path(__file__).parent / '.launcher-state' / 'connection.log'
+        path = paths.state_dir() / 'connection.log'
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open('a', encoding='utf-8') as stream:

@@ -36,9 +36,11 @@ email_sender.json
 *.key
 *.sqlite*
 *.zip
-/*.log
-/*smoke*.json
-/*check*.json
+# Stray run output. Logs and smoke/check reports are never source, at any
+# depth; PNGs stay root-only because assets/ legitimately holds icons.
+*.log
+*smoke*.json
+*check*.json
 /*.png
 tmp*/
 *.tmp

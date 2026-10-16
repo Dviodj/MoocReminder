@@ -4,6 +4,8 @@ These run the real ASSIGNMENTS/HOME_CARDS scripts against real rendered pages in
 QtWebEngine, which is what reads the MOOC site at runtime. They need a desktop
 session, not network access.
 """
+
+import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 import sys
 import tempfile
 import unittest

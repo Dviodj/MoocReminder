@@ -21,9 +21,9 @@ if "%~1"=="" (
 
 where python >nul 2>nul
 if errorlevel 1 (
-    py -3 "%~dp0source_launcher.py" %*
+    py -3 "%~dp0src\system\source_launcher.py" %*
 ) else (
-    python "%~dp0source_launcher.py" %*
+    python "%~dp0src\system\source_launcher.py" %*
 )
 if errorlevel 1 (
     echo.
