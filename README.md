@@ -44,9 +44,10 @@
 
 ### 使用步骤
 
-1. 下载 **便携包**（解压完整文件夹）：v0.2.1 的便携包需先配置发件邮箱，尚未上传；在此之前请使用
-   [v0.1.2 便携包](https://github.com/Dviodj/MoocReminder/releases/download/v0.1.2/MoocReminder-v0.1.2-offline-x64.zip)
-   （压缩包约 248 MB，解压后约 669 MB），或使用 [v0.2.1 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.1/MoocReminder-v0.2.1-source.zip) 自行安装依赖。
+1. 下载 **便携包**
+   （[MoocReminder-v0.2.1-offline-x64.zip](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.1/MoocReminder-v0.2.1-offline-x64.zip)，
+   压缩包约 248 MB，解压后约 669 MB）并解压出完整文件夹，解压即用；想自己装依赖的话，
+   也可以用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.1/MoocReminder-v0.2.1-source.zip)。
 2. 双击 **启动MoocReminder.bat**，启动窗口会显示进度，随后弹出登录窗。
 3. 第一次使用点 **注册账号**，只填一个账号名称（例如「主账号」）即可进入。
 4. 进入后点 **绑定慕课与邮箱**，填入课程主页链接 `https://www.icourse163.org/home.htm?userId=你的数字账号#/home/course` 和接收提醒的邮箱。这两步完成前无法检查作业。
