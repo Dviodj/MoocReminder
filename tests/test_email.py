@@ -1,6 +1,7 @@
 import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -81,10 +82,22 @@ class ShippedSenderTests(unittest.TestCase):
                 path.unlink() if path.is_file() else path.rmdir()
             empty.rmdir()
 
-    def test_the_repository_file_ships_empty(self):
-        # The tracked copy must never carry a real credential.
-        shipped = emailer.load_sender(Path(__file__).resolve().parents[1], refresh=True)
-        self.assertEqual(shipped, {}, '仓库里的 email_sender.json 必须保持为空模板')
+    def test_the_repository_never_tracks_a_real_credential(self):
+        """The tracked template stays empty and the real file stays ignored.
+
+        A publisher's checkout legitimately has email_sender.json on disk, so
+        the guarantee is about what git tracks, not about what happens to be
+        present locally.
+        """
+        root = Path(__file__).resolve().parents[1]
+        example = json.loads((root/'email_sender.example.json').read_text(encoding='utf-8'))
+        # Only the credential-bearing fields matter; port and security are
+        # harmless defaults that the template is meant to carry.
+        self.assertEqual(example.get('sender', ''), '', '模板里不能有真实发件邮箱')
+        self.assertEqual(example.get('password', ''), '', '模板里不能有授权码')
+        result = subprocess.run(['git', 'check-ignore', '-q', '--', 'email_sender.json'],
+                                cwd=root, capture_output=True)
+        self.assertEqual(result.returncode, 0, 'email_sender.json 必须被 .gitignore 排除')
 
     def test_a_malformed_sender_file_is_ignored(self):
         (self.folder/'email_sender.json').write_text('{ not json', encoding='utf-8')
@@ -176,6 +189,11 @@ class AddressAndTimeTests(unittest.TestCase):
 
 
 class ValidateTests(unittest.TestCase):
+    def setUp(self):
+        # An empty folder, so the publisher's shipped sender cannot quietly
+        # supply a field these tests expect the user to be asked for.
+        self.empty = scratch_folder('validate-no-sender')
+
     def base(self, **overrides):
         config = dict(enabled=True, recipient='me@qq.com', sender='me@qq.com', server='smtp.qq.com',
                       port=465, security='ssl', password='授权码', digest_times=[])
@@ -184,26 +202,27 @@ class ValidateTests(unittest.TestCase):
 
     def test_missing_recipient_is_explained(self):
         with self.assertRaises(EmailError) as error:
-            validate(self.base(recipient=''))
+            validate(self.base(recipient=''), folder=self.empty)
         self.assertIn('接收提醒的邮箱', str(error.exception))
 
     def test_malformed_recipient_is_explained(self):
         with self.assertRaises(EmailError):
-            validate(self.base(recipient='nope'))
+            validate(self.base(recipient='nope'), folder=self.empty)
 
     def test_disabled_config_needs_no_server_or_password(self):
-        settings = validate(dict(enabled=False, recipient='me@qq.com', server='', password=''))
+        settings = validate(dict(enabled=False, recipient='me@qq.com', server='', password=''),
+                            folder=self.empty)
         self.assertFalse(settings.enabled)
 
     def test_enabled_config_requires_server_password_and_known_security(self):
         with self.assertRaises(EmailError):
-            validate(self.base(server=''))
+            validate(self.base(server=''), folder=self.empty)
         with self.assertRaises(EmailError):
-            validate(self.base(password=''))
+            validate(self.base(password=''), folder=self.empty)
         with self.assertRaises(EmailError):
-            validate(self.base(security='plain'))
+            validate(self.base(security='plain'), folder=self.empty)
         with self.assertRaises(EmailError):
-            validate(self.base(port=70000))
+            validate(self.base(port=70000), folder=self.empty)
 
     def test_smtp_is_the_registered_default_channel(self):
         self.assertIsInstance(get_notifier(), SmtpNotifier)
