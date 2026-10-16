@@ -72,7 +72,10 @@ class EmailSettingsFormTests(unittest.TestCase):
         email = dict(enabled=True, recipient='me@qq.com', server='smtp.qq.com', port=465,
                      security='ssl', password=password, digest_times=['08:00'])
         email.update(overrides)
-        return EmailSettingsForm(email, None, folder)
+        # An empty folder unless the test asks for a shipped sender: leaving it
+        # unset makes the form read the publisher's real email_sender.json, so
+        # the test would measure this machine instead of the rule it states.
+        return EmailSettingsForm(email, None, scratch_folder('no-shipped-sender') if folder is None else folder)
 
     def shipped_folder(self, **values):
         """A folder holding a publisher sender config, for the shipped path."""
@@ -119,15 +122,34 @@ class EmailSettingsFormTests(unittest.TestCase):
 
     def test_a_build_without_a_shipped_sender_says_so_instead_of_pretending(self):
         """A source checkout has no email_sender.json; the form must not promise one."""
-        form = self.make(recipient='', server='', folder=scratch_folder('no-shipped-sender'))
-        form.recipient.setText('someone@163.com')
-        self.assertNotIn('reminder@example.com', form.hint.text())
-        self.assertIn('没有预置发件邮箱', form.hint.text())
-        self.assertIn('高级选项', form.hint.text())
+        form = self.make(recipient='', server='')
+        # Nothing can be sent from a shipped address here, so the choice is made
+        # for the user rather than offered: their own mailbox is the only way.
+        self.assertFalse(form.official.isEnabled())
+        self.assertTrue(form.custom.isChecked())
+        self.assertTrue(form.advanced.isVisibleTo(form))
+        self.assertIn('没有预置', form.official.text())
+        self.assertIn('没有内置发件邮箱', form.shipped_note())
 
-    def test_advanced_mode_suggests_a_server_for_the_sender(self):
+    def test_the_shipped_sender_is_the_default_choice(self):
+        """Two alternatives, stated as a choice — not an "advanced" switch."""
+        form = self.make(recipient='me@qq.com', folder=self.shipped_folder())
+        self.assertTrue(form.official.isChecked())
+        self.assertFalse(form.custom.isChecked())
+        self.assertFalse(form.advanced.isVisibleTo(form))
+        self.assertFalse(form.values()['advanced'])
+        form.custom.setChecked(True)
+        self.assertTrue(form.advanced.isVisibleTo(form))
+        self.assertTrue(form.values()['advanced'])
+
+    def test_a_stored_custom_choice_reopens_on_the_custom_option(self):
+        form = self.make(recipient='me@qq.com', advanced=True, folder=self.shipped_folder())
+        self.assertTrue(form.custom.isChecked())
+        self.assertTrue(form.advanced.isVisibleTo(form))
+
+    def test_choosing_a_custom_sender_suggests_a_server_for_the_sender(self):
         form = self.make(recipient='', server='', port=465)
-        form.advanced_toggle.setChecked(True)
+        form.custom.setChecked(True)
         form.sender.setText('someone@163.com')
         self.assertEqual(form.server.text(), 'smtp.163.com')
         self.assertEqual(form.port.value(), 465)
@@ -135,14 +157,14 @@ class EmailSettingsFormTests(unittest.TestCase):
 
     def test_a_manually_typed_server_is_not_overwritten(self):
         form = self.make(recipient='', server='mail.mycompany.com', port=2525)
-        form.advanced_toggle.setChecked(True)
+        form.custom.setChecked(True)
         form.sender.setText('someone@163.com')
         self.assertEqual(form.server.text(), 'mail.mycompany.com')
         self.assertEqual(form.port.value(), 2525)
 
     def test_unknown_provider_is_reported_and_custom_server_kept(self):
         form = self.make(recipient='', server='', port=465)
-        form.advanced_toggle.setChecked(True)
+        form.custom.setChecked(True)
         form.sender.setText('someone@company.example')
         self.assertIn('手动填写', form.hint.text())
         self.assertEqual(form.server.text(), '')

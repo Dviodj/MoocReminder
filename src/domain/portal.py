@@ -220,7 +220,7 @@ class Controller:
             raise ValueError('请先填写接收提醒的邮箱并启用邮件提醒。')
         # A credential the user stored, or the one shipped with the program.
         if not emailer.resolve_password(config, paths.PROGRAM_ROOT):
-            raise ValueError('邮件发送账号尚未配置，请在高级选项里填写邮箱授权码。')
+            raise ValueError('邮件发送账号尚未配置，请选择「使用我自己的发件邮箱」并填写邮箱授权码。')
         now = now_beijing()
         mail = emailer.Mail(subject='【测试】MoocReminder 邮件提醒已连接',
             text='这是一封测试邮件。\n\n收到它说明邮箱设置正确：作业临近截止时，提醒会发到这个地址。\n\n'

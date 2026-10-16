@@ -127,7 +127,7 @@ class ShippedSenderTests(unittest.TestCase):
                 emailer.validate(self.user, emailer.resolve_password(self.user, empty), empty)
             message = str(error.exception)
             self.assertIn('没有预置发件邮箱', message)
-            self.assertIn('高级选项', message)
+            self.assertIn('使用我自己的发件邮箱', message)
         finally:
             for path in sorted(empty.rglob('*'), reverse=True):
                 path.unlink() if path.is_file() else path.rmdir()

@@ -26,7 +26,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
     QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QTextBrowser, QStackedWidget, QMenu,
-    QSystemTrayIcon)
+    QSystemTrayIcon, QRadioButton, QButtonGroup)
 from portal import Controller
 import autostart
 import browser
@@ -123,11 +123,19 @@ class EmailSettingsForm(QWidget):
         self.digest_hint = QLabel('到点发一封汇总邮件，列出所有未截止作业；与“提前提醒”互不影响，两种邮件都会发。')
         self.digest_hint.setObjectName('muted'); self.digest_hint.setWordWrap(True)
         layout.addWidget(self.digest_hint)
-        # Everything below is optional: the program ships a sender, so an
-        # ordinary user only needs the address above.
-        self.advanced_toggle = QCheckBox('高级选项（自定义发件邮箱与服务器）')
-        self.advanced_toggle.setChecked(bool(email.get('advanced')))
-        layout.addWidget(self.advanced_toggle)
+        # Who the mail comes from is a choice, made explicitly: the shipped
+        # address by default, or the user's own mailbox. It used to hide behind
+        # an "advanced options" checkbox, which read as a power-user switch
+        # rather than as the two alternatives it actually is.
+        self.official = QRadioButton('使用程序内置的发件邮箱（推荐）')
+        self.custom = QRadioButton('使用我自己的发件邮箱')
+        if self.shipped:
+            self.official.setToolTip(f'提醒将从 {self.shipped} 发出，你不需要填写任何服务器信息。')
+        self.sender_choice = QButtonGroup(self)
+        self.sender_choice.addButton(self.official)
+        self.sender_choice.addButton(self.custom)
+        layout.addWidget(self.official)
+        layout.addWidget(self.custom)
         self.advanced = QWidget()
         advanced_form = QFormLayout(self.advanced)
         advanced_form.setContentsMargins(0, 0, 0, 0)
@@ -137,8 +145,16 @@ class EmailSettingsForm(QWidget):
         advanced_form.addRow('加密方式', self.security)
         advanced_form.addRow('授权码', self.password)
         layout.addWidget(self.advanced)
-        self.advanced.setVisible(self.advanced_toggle.isChecked())
-        self.advanced_toggle.toggled.connect(self.advanced.setVisible)
+        # No shipped sender means the custom fields are the only way to send at
+        # all, so the choice is made for the user instead of offered.
+        use_custom = bool(email.get('advanced')) or not self.shipped
+        self.official.setChecked(not use_custom)
+        self.custom.setChecked(use_custom)
+        if not self.shipped:
+            self.official.setEnabled(False)
+            self.official.setText('使用程序内置的发件邮箱（这个版本没有预置）')
+        self.advanced.setVisible(use_custom)
+        self.custom.toggled.connect(self.advanced.setVisible)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         self.hint.setObjectName('muted')
@@ -164,7 +180,7 @@ class EmailSettingsForm(QWidget):
         self.clear_password.clicked.connect(self.forget)
         self.test_button.clicked.connect(self.request_test)
         self.guide_button.clicked.connect(self.show_guide)
-        self.advanced_toggle.toggled.connect(lambda _: self.autofill(self.recipient.text()))
+        self.custom.toggled.connect(lambda _: self.autofill(self.recipient.text()))
         self.autofill(self.recipient.text())
 
     def show_guide(self):
@@ -213,24 +229,24 @@ class EmailSettingsForm(QWidget):
         mailbox looks like spam, and users were left guessing who sent it.
         """
         if self.shipped:
-            return f'提醒将由程序预置的发件邮箱 {self.shipped} 统一发出；你只需填写上面的收件邮箱，无需了解邮件服务器。'
-        return '这个版本没有预置发件邮箱，请展开「高级选项」，填写你自己的发件邮箱、邮件服务器与授权码。'
+            return f'提醒将由程序内置的发件邮箱 {self.shipped} 统一发出；你只需填写上面的收件邮箱。'
+        return '这个版本没有内置发件邮箱，请选择「使用我自己的发件邮箱」，填写发件邮箱、邮件服务器与授权码。'
 
     def autofill(self, text):
         """Offer a provider preset for the sender the user is configuring.
 
-        Only in advanced mode: the server has to match whoever actually sends,
-        which by default is the shipped sender, not the address being typed in
-        as the recipient.
+        Only when the user sends from their own mailbox: the server has to
+        match whoever actually sends, and by default that is the shipped
+        sender, not the address typed in as the recipient.
         """
         self.test_button.setEnabled(bool(str(text).strip()))
-        if not self.advanced_toggle.isChecked():
+        if not self.custom.isChecked():
             if not str(text).strip():
                 self.hint.setText('')
             elif self.shipped:
                 self.hint.setText(f'提醒将从 {self.shipped} 发出，你只需填写自己的收件邮箱。')
             else:
-                self.hint.setText('这个版本没有预置发件邮箱，请展开「高级选项」填写你自己的发件邮箱与授权码。')
+                self.hint.setText('这个版本没有内置发件邮箱，请选择「使用我自己的发件邮箱」并填写下面的信息。')
             return
         preset = emailer.suggest_server(self.sender.text() or text)
         if not preset:
@@ -251,7 +267,7 @@ class EmailSettingsForm(QWidget):
     def values(self):
         """Return the settings patch; omit the code unless the user typed one."""
         config = dict(enabled=self.enabled.isChecked(), recipient=self.recipient.text().strip(),
-                      advanced=self.advanced_toggle.isChecked(),
+                      advanced=self.custom.isChecked(),
                       sender=self.sender.text().strip(), server=self.server.text().strip(),
                       port=self.port.value(), security=self.security.currentData(),
                       digest_times=[part.strip() for part in self.digest.text().replace('，', ',').split(',') if part.strip()])

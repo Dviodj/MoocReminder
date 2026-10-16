@@ -202,7 +202,7 @@ def validate(config, password=None, folder=None):
         # user to go and find server details they have no reason to know.
         if shipped_sender(folder):
             raise EmailError('请填写邮件服务器地址，或先填入发件邮箱以自动识别。')
-        raise EmailError('这个版本没有预置发件邮箱，请在「高级选项」里填写发件邮箱、邮件服务器与授权码。')
+        raise EmailError('这个版本没有预置发件邮箱，请选择「使用我自己的发件邮箱」并填写发件邮箱、邮件服务器与授权码。')
     if not isinstance(settings.port, int) or not 1 <= settings.port <= 65535:
         raise EmailError('邮件服务器端口需要在 1–65535 之间。')
     if settings.security not in ('ssl', 'starttls'):
