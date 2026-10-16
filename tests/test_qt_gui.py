@@ -2,12 +2,15 @@
 
 import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 import gc
+import json
 import os
 from pathlib import Path
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+
+from _bootstrap import scratch_folder
 
 from qt_bootstrap import prepare_qt
 
@@ -65,11 +68,20 @@ class EmailSettingsFormTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def make(self, password='', **overrides):
+    def make(self, password='', folder=None, **overrides):
         email = dict(enabled=True, recipient='me@qq.com', server='smtp.qq.com', port=465,
                      security='ssl', password=password, digest_times=['08:00'])
         email.update(overrides)
-        return EmailSettingsForm(email)
+        return EmailSettingsForm(email, None, folder)
+
+    def shipped_folder(self, **values):
+        """A folder holding a publisher sender config, for the shipped path."""
+        folder = scratch_folder('shipped-sender')
+        config = dict(sender='reminder@example.com', server='smtp.example.com',
+                      port=465, security='ssl', password='admin-secret')
+        config.update(values)
+        (folder/'email_sender.json').write_text(json.dumps(config), encoding='utf-8')
+        return folder
 
     def test_stored_values_are_shown_back(self):
         form = self.make(digest_times=['08:00', '20:00'])
@@ -98,11 +110,20 @@ class EmailSettingsFormTests(unittest.TestCase):
 
     def test_a_recipient_alone_is_enough_and_does_not_touch_the_server(self):
         """Ordinary users only give their own address; the sender is shipped."""
-        form = self.make(recipient='', server='', port=465)
+        form = self.make(recipient='', server='', port=465, folder=self.shipped_folder())
         form.recipient.setText('someone@163.com')
         self.assertEqual(form.server.text(), '')
-        self.assertIn('预置的发件邮箱', form.hint.text())
         self.assertFalse(form.advanced.isVisibleTo(form))
+        # Naming the address matters: an unrecognised sender looks like spam.
+        self.assertIn('reminder@example.com', form.hint.text())
+
+    def test_a_build_without_a_shipped_sender_says_so_instead_of_pretending(self):
+        """A source checkout has no email_sender.json; the form must not promise one."""
+        form = self.make(recipient='', server='', folder=scratch_folder('no-shipped-sender'))
+        form.recipient.setText('someone@163.com')
+        self.assertNotIn('reminder@example.com', form.hint.text())
+        self.assertIn('没有预置发件邮箱', form.hint.text())
+        self.assertIn('高级选项', form.hint.text())
 
     def test_advanced_mode_suggests_a_server_for_the_sender(self):
         form = self.make(recipient='', server='', port=465)

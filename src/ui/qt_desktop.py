@@ -80,9 +80,14 @@ class EmailSettingsForm(QWidget):
 
     test_requested = Signal(dict)
 
-    def __init__(self, email, parent=None):
+    def __init__(self, email, parent=None, folder=None):
         super().__init__(parent)
         email = dict(email or {})
+        # The shipped sender decides whether this build can send at all, so the
+        # wording below has to branch on it rather than promise a sender that
+        # may not be configured.
+        self.folder = folder
+        self.shipped = emailer.shipped_sender(folder)
         self.saved_password = bool(emailer.password_saved(email.get('password', '')))
         self.forget_password = False
         self.password_touched = False
@@ -149,7 +154,7 @@ class EmailSettingsForm(QWidget):
         state.addWidget(self.clear_password)
         state.addStretch()
         layout.addLayout(state)
-        note = QLabel('提醒由程序预置的发件邮箱统一发出；填好上面的邮箱即可，无需了解邮件服务器。')
+        note = QLabel(self.shipped_note())
         note.setObjectName('muted')
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -201,6 +206,16 @@ class EmailSettingsForm(QWidget):
         self.clear_password.setVisible(False)
         self.hint.setText('保存后本机不再保留授权码，需要重新填写才能发信。')
 
+    def shipped_note(self):
+        """What to say about the sender this build will actually use.
+
+        Naming the address matters: a reminder arriving from an unrecognised
+        mailbox looks like spam, and users were left guessing who sent it.
+        """
+        if self.shipped:
+            return f'提醒将由程序预置的发件邮箱 {self.shipped} 统一发出；你只需填写上面的收件邮箱，无需了解邮件服务器。'
+        return '这个版本没有预置发件邮箱，请展开「高级选项」，填写你自己的发件邮箱、邮件服务器与授权码。'
+
     def autofill(self, text):
         """Offer a provider preset for the sender the user is configuring.
 
@@ -210,7 +225,12 @@ class EmailSettingsForm(QWidget):
         """
         self.test_button.setEnabled(bool(str(text).strip()))
         if not self.advanced_toggle.isChecked():
-            self.hint.setText('提醒会从程序预置的发件邮箱发出，你只需填写自己的邮箱。' if str(text).strip() else '')
+            if not str(text).strip():
+                self.hint.setText('')
+            elif self.shipped:
+                self.hint.setText(f'提醒将从 {self.shipped} 发出，你只需填写自己的收件邮箱。')
+            else:
+                self.hint.setText('这个版本没有预置发件邮箱，请展开「高级选项」填写你自己的发件邮箱与授权码。')
             return
         preset = emailer.suggest_server(self.sender.text() or text)
         if not preset:
@@ -958,7 +978,7 @@ class Window(QMainWindow):
         mooc_hint = QLabel('登录慕课后打开个人主页，地址栏里的 userId 就是你的账号。')
         mooc_hint.setObjectName('muted'); mooc_hint.setWordWrap(True); layout.addWidget(mooc_hint)
         email_title = QLabel('二、接收提醒的邮箱'); email_title.setObjectName('sectionTitle'); layout.addWidget(email_title)
-        form = EmailSettingsForm(settings.get('email'), dialog)
+        form = EmailSettingsForm(settings.get('email'), dialog, self.workspace)
         form.enabled.setChecked(True)
         layout.addWidget(form)
         self._email_dialog = (dialog, form)
@@ -1056,7 +1076,7 @@ class Window(QMainWindow):
         dialog.resize(560, 520)
         layout = QVBoxLayout(dialog)
         settings = self.store.data['settings']
-        form = EmailSettingsForm(settings.get('email'), dialog)
+        form = EmailSettingsForm(settings.get('email'), dialog, self.workspace)
         layout.addWidget(form)
         self._email_dialog = (dialog, form)
         form.test_requested.connect(lambda patch: self.send_test_email(dialog, form, patch))
@@ -1156,7 +1176,7 @@ class Window(QMainWindow):
         reminder_note=QLabel('“提前提醒”：作业还剩上面这些小时数时，立刻发一封提醒邮件，可填多个（用逗号分开）。')
         reminder_note.setObjectName('muted');reminder_note.setWordWrap(True);layout.addWidget(reminder_note)
         divider=QLabel('邮件提醒');divider.setObjectName('sectionTitle');layout.addWidget(divider)
-        mail=EmailSettingsForm(settings.get('email'),dialog);layout.addWidget(mail)
+        mail=EmailSettingsForm(settings.get('email'),dialog,self.workspace);layout.addWidget(mail)
         self._email_dialog = (dialog, mail)
         mail.test_requested.connect(lambda patch: self.send_test_email(dialog,mail,patch))
         layout.addStretch()

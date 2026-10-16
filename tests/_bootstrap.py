@@ -8,6 +8,7 @@ this module does that, and also exposes the paths a test needs.
 ``import _bootstrap`` works without any packaging.
 """
 from pathlib import Path
+import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,3 +48,24 @@ def stub_launcher(workspace):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('# stub', encoding='utf-8')
     return target
+
+
+_scratch = None
+
+
+def scratch_folder(name):
+    """An empty scratch directory under the gitignored ``.build/temp``.
+
+    ``tempfile`` cannot be trusted for this: the program points TEMP at the
+    checkout, and a confined run may refuse the usual location, in which case
+    ``tempfile`` silently falls back to the working directory and litters the
+    repository root with ``tmp*`` folders.
+    """
+    global _scratch
+    if _scratch is None:
+        _scratch = ROOT / '.build' / 'temp' / 'tests'
+        _scratch.mkdir(parents=True, exist_ok=True)
+    folder = _scratch / name
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    return folder

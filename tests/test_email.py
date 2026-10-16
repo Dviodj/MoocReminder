@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from _bootstrap import scratch_folder
+
 import emailer
 import secrets_store
 from browser import parse_cookie_header
@@ -88,6 +90,36 @@ class ShippedSenderTests(unittest.TestCase):
         (self.folder/'email_sender.json').write_text('{ not json', encoding='utf-8')
         self.assertEqual(emailer.load_sender(self.folder, refresh=True), {})
 
+    def test_the_interface_can_name_the_address_that_will_send(self):
+        """Users were getting mail from an address the program never showed."""
+        self.assertEqual(emailer.shipped_sender(self.folder), 'reminder@example.com')
+        self.assertEqual(emailer.shipped_sender(scratch_folder('no-sender-file')), '')
+
+    def test_a_sender_is_only_ready_when_it_can_actually_deliver(self):
+        self.assertTrue(emailer.sender_ready(self.folder))
+        original = json.loads((self.folder/'email_sender.json').read_text(encoding='utf-8'))
+        for missing in ('sender', 'server', 'password'):
+            broken = dict(original, **{missing: ''})  # one field blank at a time
+            (self.folder/'email_sender.json').write_text(json.dumps(broken), encoding='utf-8')
+            emailer.load_sender(self.folder, refresh=True)  # the module caches per path
+            self.assertFalse(emailer.sender_ready(self.folder), missing + ' empty must not count as ready')
+            if missing != 'sender':
+                self.assertTrue(emailer.shipped_sender(self.folder), 'a blank credential still leaves the address known')
+
+    def test_without_a_shipped_sender_the_message_names_the_fix(self):
+        """The old wording told users to fill a server they had no reason to know."""
+        empty = Path(tempfile.mkdtemp())
+        try:
+            with self.assertRaises(EmailError) as error:
+                emailer.validate(self.user, emailer.resolve_password(self.user, empty), empty)
+            message = str(error.exception)
+            self.assertIn('没有预置发件邮箱', message)
+            self.assertIn('高级选项', message)
+        finally:
+            for path in sorted(empty.rglob('*'), reverse=True):
+                path.unlink() if path.is_file() else path.rmdir()
+            empty.rmdir()
+
 
 class CookieLoginTests(unittest.TestCase):
     """The cookie fallback must parse real pastes and ignore everything else."""
@@ -112,7 +144,9 @@ class CookieLoginTests(unittest.TestCase):
 
     def test_login_with_cookies_refuses_an_empty_paste(self):
         from browser import MoocBrowser
-        reader = MoocBrowser(tempfile.mkdtemp())
+        # A scratch folder, not tempfile: the latter falls back to the working
+        # directory under confinement and left tmp* folders in the checkout.
+        reader = MoocBrowser(scratch_folder('cookie-login'))
         with self.assertRaises(ValueError) as error:
             reader.login_with_cookies('https://www.icourse163.org/home.htm?userId=1#/home/course', '  ')
         self.assertIn('Cookie', str(error.exception))
