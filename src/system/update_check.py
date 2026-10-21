@@ -308,6 +308,97 @@ def _code_blocks(page, language):
     return parser.blocks
 
 
+# Elements that end a line of prose.  Everything else (a link, bold, a path in
+# ``<code>``) is inline and must not break the sentence it sits in.
+_BLOCK_TAGS = frozenset(('p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol',
+                         'li', 'div', 'blockquote', 'table', 'tr', 'td', 'th',
+                         'details', 'summary'))
+
+
+class _NotesParser(html.parser.HTMLParser):
+    """Renders the marked-up notes of a release page as plain text.
+
+    Reading markup with regular expressions cannot find the end of an element
+    that contains others: the first ``</div>`` it meets belongs to the code
+    block, not to the body, and the notes stop in the wrong place.  This walks
+    the nesting instead, and discards code blocks: the announcement block is
+    data, shown as announcements, not as prose.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.started = False
+        self.depth = 0
+        self.skip = 0
+        # The text of a heading that is holding no other element.  A block that
+        # follows it may be the announcement block, and then the heading that
+        # introduced it has to go too, or it reads as the notes' last word.
+        self.heading = None
+        self.parts = []
+
+    def _gap(self, text):
+        if self.parts and self.parts[-1] != '\n':
+            self.parts.append(text)
+
+    def _drop_heading_if_a_block_follows(self, tag):
+        if self.heading is None:
+            return
+        if tag == 'pre':
+            self.heading = None          # it introduced the block, drop both
+        else:
+            self.parts.append(self.heading)
+            self.heading = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in ('br', 'img', 'hr', 'input'):
+            self._drop_heading_if_a_block_follows(tag)
+        if self.skip or tag in ('pre', 'script', 'style'):
+            if tag not in ('br', 'img', 'hr', 'input'):
+                self.skip += 1
+            return
+        if not self.started:
+            if 'markdown-body' in (dict(attrs).get('class') or ''):
+                self.started = True
+                self.depth = 1
+            return
+        self.depth += 1
+        if tag == 'br':
+            self.depth -= 1
+            self.parts.append('\n')
+        elif tag == 'li':
+            self._gap('\n')
+            self.parts.append('· ')
+        elif tag in _BLOCK_TAGS:
+            self._gap('\n')
+
+    def handle_endtag(self, tag):
+        if self.heading is not None and tag in ('pre', 'code'):
+            self.heading = None
+        if self.skip:
+            if tag not in ('br', 'img', 'hr', 'input'):
+                self.skip = max(0, self.skip - 1)
+            return
+        if not self.started:
+            return
+        self.depth -= 1
+        if tag in _BLOCK_TAGS:
+            self._gap('\n')
+        if self.depth <= 0:
+            self.started = False
+
+    def handle_data(self, data):
+        if self.started and not self.skip:
+            self.parts.append(data)
+            if len(data.strip()) > 1:
+                self._last = data
+
+    def text(self):
+        body = ''.join(self.parts)
+        lines = [line.strip() for line in body.replace('\r\n', '\n').split('\n')]
+        kept = [line for line in lines if line != '公告']
+        return re.sub(r'\n{3,}', '\n\n', '\n'.join(kept)).strip()
+
+
 def release_notes(page):
     """One line standing in for the release notes on the card."""
     if isinstance(page, (bytes, bytearray)):
@@ -351,28 +442,13 @@ def notes_block(page):
         page = page.decode('utf-8', 'replace')
     if not isinstance(page, str):
         return ''
-    start = page.find('markdown-body')
-    if start < 0:
+    parser = _NotesParser()
+    try:
+        parser.feed(page)
+        parser.close()
+    except Exception:
         return ''
-    segment = page[start:start + 40000]
-    # The body starts inside the opening tag, and the end is the first closing
-    # element after the tag's opening ``>``.
-    opening = segment.find('>')
-    if opening > 0:
-        segment = segment[opening + 1:]
-    end = segment.find('</div>')
-    if end > 0:
-        segment = segment[:end]
-    # The announcement block is data, not prose; it is shown as announcements.
-    segment = re.sub(r'<div class="snippet-clipboard-content.*?</div>', '', segment, flags=re.S)
-    segment = re.sub(r'<pre.*?</pre>', '', segment, flags=re.S)
-    segment = re.sub(r'<(h[1-6])[^>]*>', '\n\n', segment)
-    segment = re.sub(r'</(p|h[1-6]|li|ul)>', '\n', segment)
-    segment = re.sub(r'<li[^>]*>', '· ', segment)
-    segment = re.sub(r'<[^>]+>', '', segment)
-    text = html.unescape(segment).replace('\r\n', '\n')
-    text = '\n'.join(line.strip() for line in text.split('\n'))
-    return re.sub(r'\n{3,}', '\n\n', text).strip()[:MAX_TEXT]
+    return parser.text()[:MAX_TEXT]
 
 
 def archive_url(page=100):

@@ -261,6 +261,36 @@ class PageTests(unittest.TestCase):
         self.assertTrue(got['url'].endswith('/releases/tag/v0.9.1'))
         self.assertEqual(['2026-10-21'], [item['id'] for item in got['announcements']])
 
+    def test_the_change_log_after_the_announcement_block_is_kept(self):
+        # The block sits inside its own <div>, which itself sits inside the
+        # body: a reader looking for the first `</div>` ends the notes at the
+        # block instead of after it, and the heading that introduced the block
+        # then reads as the notes' last word.
+        page = ('<div class="markdown-body tmp-my-3"><h2>这一版有什么</h2>'
+                '<ul><li>新增<strong>一键更新</strong></li></ul>'
+                '<h2>公告</h2>'
+                '<div class="snippet-clipboard-content notranslate">'
+                '<pre lang="mooc-reminder-announcements"><code>' + self.BLOCK + '</code></pre></div>'
+                '<h2>验证</h2><ul><li>444 项自动测试通过</li></ul></div>')
+        detail = update_check.notes_block(page)
+        self.assertIn('· 新增一键更新', detail)
+        self.assertIn('· 444 项自动测试通过', detail)
+        self.assertNotIn('公告', detail)
+        self.assertNotIn('正文', detail)
+
+    def test_a_line_break_in_the_notes_does_not_split_a_sentence(self):
+        page = ('<div class="markdown-body"><p>前半句<br>后半句</p>'
+                '<p>用 <code>data</code> 文件夹记住</p></div>')
+        self.assertEqual('前半句\n后半句\n用 data 文件夹记住',
+                         update_check.notes_block(page))
+
+    def test_a_heading_that_was_not_the_announcement_heading_stays(self):
+        page = ('<div class="markdown-body"><h2>下载</h2><p>直接下载：</p>'
+                '<pre lang="mooc-reminder-announcements">' + self.BLOCK + '</pre></div>')
+        detail = update_check.notes_block(page)
+        self.assertIn('下载', detail)
+        self.assertIn('直接下载：', detail)
+
 
 class UnseenTests(unittest.TestCase):
     ITEMS = [dict(id='old'), dict(id='new')]

@@ -609,13 +609,19 @@ class NoticeDialog(QDialog):
     button.
     """
 
+    # The width every announcement window opens at.  It is a class attribute so
+    # that the window can be shown at the right width before its text is laid
+    # out: the document wraps to that width, and only then can the height be
+    # read from it.
+    WIDTH = 680
+
     def __init__(self, window, parent=None):
         super().__init__(parent or window)
         self.window = window
         self.setWindowTitle(f'公告 · {APP_NAME}')
         self.setWindowIcon(QIcon(str(paths.icon_path())))
         self.setStyleSheet(STYLE)
-        self.resize(660, 560)
+        self.resize(self.WIDTH, 560)
         self.setMinimumSize(560, 360)
         layout = QVBoxLayout(self); layout.setContentsMargins(22, 20, 22, 18); layout.setSpacing(10)
         self.heading = QLabel('公告'); self.heading.setObjectName('title'); layout.addWidget(self.heading)
@@ -640,6 +646,10 @@ class NoticeDialog(QDialog):
         self.doc_frame = frame
         self.footer = QLabel('')
         self.footer.setObjectName('muted'); self.footer.setWordWrap(True); layout.addWidget(self.footer)
+        # The footer is one line in every layout that matters; reserving that
+        # line now keeps the buttons from riding over it when the window is
+        # fitted to a long change log and the footer has yet to be re-measured.
+        self.footer.setMinimumHeight(self.footer.fontMetrics().lineSpacing())
         self.update_note = QLabel('')
         self.update_note.setObjectName('muted'); self.update_note.setWordWrap(True)
         self.update_note.setVisible(False); layout.addWidget(self.update_note)
@@ -713,16 +723,22 @@ class NoticeDialog(QDialog):
         applied by hand, to the browser, to its card, and then to the window.
         """
         screen = self.screen() or QApplication.primaryScreen()
-        room = (screen.availableGeometry().height() - 240) if screen is not None else 720
+        room = max(360, self.window.window_room(screen) - 120)
+        # ``sizeHint`` is measured against whatever height the browser last had,
+        # so it grows a step at a time.  Pinning the browser to the height the
+        # text actually needs settles it in one pass; a document taller than the
+        # screen keeps the cap and scrolls.
         wanted = int(self.view.document().size().height()) + 34
         height = max(120, min(wanted, room))
         self.view.setMinimumHeight(height); self.view.setMaximumHeight(height)
         self.doc_frame.setMinimumHeight(height); self.doc_frame.setMaximumHeight(height)
-        # A layout cannot make a window that was explicitly given a size grow, so
-        # the window is resized here, from what the layout says it needs.
         self.layout().activate()
-        room = (screen.availableGeometry().height() - 120) if screen is not None else 760
-        self.resize(self.width(), int(min(max(self.sizeHint().height(), 360), room)))
+        # The hint is read after the browser has been pinned, so it already
+        # counts every line; only the final ceiling is needed on top, and it
+        # has to come last or the window would be told to grow and shrink at
+        # the same time.
+        tallest = min(max(360, self.sizeHint().height()), room + 120)
+        self.resize(self.width(), tallest)
 
     def check_now(self):
         self.window.start_notice_check(manual=True, then=self.notice_checked)
@@ -1665,17 +1681,23 @@ class Window(QMainWindow):
                 entries[0] = first
         return update_check.history(entries)
 
+    def window_room(self, screen):
+        """How tall the announcement window may be on ``screen``, in pixels."""
+        if screen is None:
+            return 760
+        return max(360, screen.availableGeometry().height() - 120)
+
     def open_notice_dialog(self):
         """Show (or raise) the announcement window."""
         if self.notice_dialog is None:
             self.notice_dialog = NoticeDialog(self, self)
-        self.notice_dialog.refill()        # Sized to its content, then capped: a short notice deserves a small
-        # window, and a long history is scrolled rather than grown.
+        # The width is fixed before the text is laid out: the document wraps to
+        # the browser's width, so a width decided afterwards would be measured
+        # against the wrong wrapping.  ``refill`` then fits the height.
         screen = self.notice_dialog.screen() or QApplication.primaryScreen()
-        available = screen.availableGeometry() if screen is not None else None
-        height = self.notice_dialog.sizeHint().height()
-        tallest = min(780, available.height() - 120) if available is not None else 780
-        self.notice_dialog.resize(max(660, self.notice_dialog.sizeHint().width()), max(420, min(height, tallest)))
+        room = self.window_room(screen)
+        self.notice_dialog.resize(NoticeDialog.WIDTH, min(560, room))
+        self.notice_dialog.refill()
         self.notice_dialog.show()
         self.notice_dialog.raise_()
         self.notice_dialog.activateWindow()
