@@ -10,8 +10,8 @@ import sys
 import uuid
 
 from core import (Assignment, DEFAULT_DIGEST_INTERVAL, DEFAULT_SETTINGS, DIGEST_FREQUENCIES,
-                  MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, account_id, binding_state, digest_cadence,
-                  digest_horizon, now_beijing, valid_home_url)
+                  MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, SOFT_SETTING_KEYS, account_id, binding_state,
+                  digest_cadence, digest_horizon, now_beijing, valid_home_url)
 import emailer
 import paths
 import secrets_store
@@ -100,11 +100,18 @@ class Store:
                 candidate = {**self.data, **saved}
                 candidate['settings'] = {**deepcopy(DEFAULT_SETTINGS), **self.base_settings, **saved.get('settings', {})}
                 settings = candidate['settings']
+                # Keys added after this account's file was written are absent
+                # rather than invalid; the defaults above already supplied them.
+                for key in SOFT_SETTING_KEYS:
+                    if key not in settings:
+                        settings[key] = deepcopy(DEFAULT_SETTINGS[key])
                 if (not isinstance(settings['home_url'], str) or not valid_home_url(settings['home_url']) or
                     not isinstance(settings['interval_minutes'], int) or not 5 <= settings['interval_minutes'] <= 1440 or
                     not isinstance(settings['reminder_hours'], list) or not settings['reminder_hours'] or
                     any(not isinstance(h, (int, float)) or not 0 < h <= 8760 for h in settings['reminder_hours']) or
                     not isinstance(settings['manual_urls'], list) or any(not isinstance(u, str) for u in settings['manual_urls']) or
+                    not isinstance(settings['announcement_seen'], list) or any(not isinstance(s, str) for s in settings['announcement_seen']) or
+                    not isinstance(settings['update_check'], bool) or
                     not isinstance(candidate['completed'], list) or not isinstance(candidate['reminders'], dict) or
                     not isinstance(candidate.get('digest_state', {}), dict) or
                     not isinstance(candidate['courses'], list) or not isinstance(candidate['errors'], list)):

@@ -25,10 +25,22 @@ DEFAULT_SETTINGS = dict(home_url=HOME_URL, manual_urls=[], interval_minutes=30,
                         # Whether the user has already answered the "start with
                         # Windows?" card, so it is shown once and never again.
                         autostart_prompted=False,
+                        # Ids of announcements the user has dismissed; kept per
+                        # account because the card lives in that account's view.
+                        announcement_seen=[],
+                        # Opt-out of the version/announcement request. It is on
+                        # by default, so the manual "检查更新" button uses this
+                        # setting exactly like the automatic check does.
+                        update_check=True,
                         email=dict(enabled=False, recipient='', sender='', server='', port=465,
                                    security='ssl', password='', digest_times=[],
                                    digest_frequency='daily', digest_weekday=0,
                                    digest_interval=DEFAULT_DIGEST_INTERVAL))
+
+# Per-account settings the program may add later: an older data.json simply
+# lacks them, and the defaults fill the gap. They are still validated, so a
+# hand-edited file cannot smuggle in something the reader cannot use.
+SOFT_SETTING_KEYS = ('announcement_seen',)
 
 
 def now_beijing():

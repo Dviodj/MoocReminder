@@ -645,6 +645,134 @@ class AutostartUiTests(unittest.TestCase):
         self.assertTrue(self.window.controller.stopping)
 
 
+class NoticeCardTests(unittest.TestCase):
+    """The version / announcement card is fed from the network, so it must be
+    driven directly here; nothing in setUp talks to GitHub."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.profiles = profiles_module.Profiles(self.temp.name)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+        self.window.notice_data = None
+        self.window.refresh()
+
+    def tearDown(self):
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.temp.cleanup()
+
+    def deliver(self, latest='v0.2.1', announcements=(), url='https://example.com/download'):
+        result = dict(latest=latest, url=url, notes='本版改动', announcements=list(announcements))
+        self.window.finish_notice_check(result)
+        return result
+
+    def test_nothing_to_say_keeps_the_card_hidden(self):
+        self.deliver()
+        self.assertFalse(self.window.notice.isVisibleTo(self.window))
+
+    def test_a_newer_version_offers_a_download(self):
+        self.assertTrue(self.deliver(latest='v0.9.9'))
+        self.assertTrue(self.window.notice.isVisibleTo(self.window))
+        self.assertIn('v0.9.9', self.window.notice_title.text())
+        self.assertEqual('下载新版本', self.window.notice_action.text())
+        # A version card is about the program, so there is nothing to dismiss.
+        self.assertFalse(self.window.notice_dismiss.isVisibleTo(self.window))
+
+    def test_opening_the_download_page_does_not_need_a_browser(self):
+        self.deliver(latest='v0.9.9')
+        with patch('qt_desktop.QDesktopServices.openUrl', return_value=True) as open_url:
+            self.assertTrue(self.window.open_notice())
+        self.assertEqual('https://example.com/download', open_url.call_args.args[0].toString())
+
+    def test_a_missing_browser_shows_the_address_instead(self):
+        self.deliver(latest='v0.9.9')
+        with patch('qt_desktop.QDesktopServices.openUrl', return_value=False):
+            self.assertFalse(self.window.open_notice())
+        self.assertIn('https://example.com/download', self.window.status.text())
+
+    def test_an_announcement_shows_once_and_stays_dismissed(self):
+        self.deliver(announcements=[dict(id='a1', title='临时维护', body='今晚停服', link='', level='info')])
+        self.assertTrue(self.window.notice.isVisibleTo(self.window))
+        self.assertEqual('临时维护', self.window.notice_title.text())
+        self.window.dismiss_notice()
+        self.assertFalse(self.window.notice.isVisibleTo(self.window))
+        self.assertIn('a1', self.window.store.data['settings']['announcement_seen'])
+
+    def test_a_dismissed_announcement_stays_dismissed_after_a_restart(self):
+        self.deliver(announcements=[dict(id='a1', title='临时维护', body='', link='', level='info')])
+        self.window.dismiss_notice()
+        reopened = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+        try:
+            reopened.finish_notice_check(dict(latest='v0.2.1', url='', notes='',
+                                             announcements=[dict(id='a1', title='临时维护', body='',
+                                                                 link='', level='info')]))
+            self.assertFalse(reopened.notice.isVisibleTo(reopened))
+        finally:
+            reopened.controller.stop()
+            reopened.controller.worker.join(timeout=2)
+            reopened.close()
+
+    def test_several_announcements_are_dismissed_one_at_a_time(self):
+        self.deliver(announcements=[dict(id='a1', title='第一条', body='', link='', level='info'),
+                                    dict(id='a2', title='第二条', body='', link='', level='warning')])
+        self.assertEqual('第一条', self.window.notice_title.text())
+        self.window.dismiss_notice()
+        self.assertEqual('第二条', self.window.notice_title.text())
+        self.assertTrue(self.window.notice.isVisibleTo(self.window))
+        self.window.dismiss_notice()
+        self.assertFalse(self.window.notice.isVisibleTo(self.window))
+
+    def test_a_failed_check_keeps_what_is_already_on_screen(self):
+        self.deliver(announcements=[dict(id='a1', title='临时维护', body='', link='', level='info')])
+        self.window.finish_notice_check(None)
+        self.assertTrue(self.window.notice.isVisibleTo(self.window))
+        self.assertEqual('临时维护', self.window.notice_title.text())
+
+    def test_the_last_announcement_dismissal_hides_the_card(self):
+        # Closing the card must also undo what the announcement did to it,
+        # otherwise the widgets underneath keep a stale state forever.
+        self.deliver(announcements=[dict(id='a1', title='临时维护', body='', link='', level='info')])
+        self.window.dismiss_notice()
+        self.assertFalse(self.window.notice.isVisibleTo(self.window))
+        self.assertTrue(self.window.notice_action.isVisibleTo(self.window.notice))
+        self.assertTrue(self.window.notice_dismiss.isVisibleTo(self.window.notice))
+
+    def test_an_announcement_body_gets_room_for_a_wrapped_line(self):
+        # A one-line minimum in this row layout clipped the second line, which
+        # read as a truncated announcement.
+        self.deliver(announcements=[dict(id='a1', title='标题', body='一二三四五', link='', level='info')])
+        line = self.window.notice_body.fontMetrics().lineSpacing()
+        self.assertGreaterEqual(self.window.notice_body.minimumSizeHint().height(), line * 2)
+
+    def test_the_binding_card_leaves_the_last_line_visible(self):
+        # The card used to collapse to its minimum height and clip the tail of
+        # the wrapped sentence, which read as a broken layout.
+        self.window.show()
+        QApplication.processEvents()
+        try:
+            detail = self.window.binding_detail
+            self.assertGreaterEqual(detail.height(), detail.sizeHint().height())
+        finally:
+            self.window.hide()
+
+    def test_the_automatic_check_respects_the_switch(self):
+        self.window.controller.settings(dict(update_check=False))
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertFalse(self.window.start_notice_check())
+        self.assertFalse(thread.called)
+
+    def test_a_check_in_flight_is_not_started_twice(self):
+        self.window.notice_busy = True
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertFalse(self.window.start_notice_check())
+        self.assertFalse(thread.called)
+
+
 class SingleInstanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

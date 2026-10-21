@@ -36,8 +36,11 @@ class SettingsSplitTests(unittest.TestCase):
         shared, per_account = split_settings(settings)
         self.assertEqual(shared, dict(interval_minutes=15, reminder_hours=[72, 24, 3],
                                       include_quizzes=True, include_finished=False,
-                                      autostart_prompted=False))
+                                      autostart_prompted=False, update_check=True))
         self.assertNotIn('home_url', shared)
+        # Dismissed announcements belong to one account's view, not to the
+        # program: switching accounts must not carry them over.
+        self.assertNotIn('announcement_seen', shared)
         self.assertEqual(per_account['home_url'], HOME_A)
 
     def test_merged_settings_let_a_profile_override_shared_defaults(self):

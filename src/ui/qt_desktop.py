@@ -20,8 +20,8 @@ from qt_bootstrap import prepare_qt
 _data = paths.data_dir()
 prepare_qt(_data)
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
@@ -34,6 +34,7 @@ import emailer
 import mail_guide
 import mail_log
 import profiles as profiles_module
+import update_check
 from core import (DEFAULT_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, WEEKDAY_NAMES,
                   account_id, binding_state as core_binding_state, digest_cadence_text, next_digest_day,
                   now_beijing)
@@ -616,6 +617,12 @@ class Window(QMainWindow):
         self.setStyleSheet(STYLE)
         self.show_past = False
         self.last_signature = None
+        # Filled by the background fetch; read by refresh().
+        self.notice_data = None
+        self.notice_version = ''
+        self.notice_busy = False
+        self.notice_seen = ''
+        self.notice_signature = None
         self._build()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -623,6 +630,9 @@ class Window(QMainWindow):
         if tray:
             self.create_tray()
         self.refresh()
+        # Asked after the window is up, not before: nothing the network says
+        # may delay the window the user just opened.
+        self.start_notice_check()
 
     def create_tray(self):
         """Add the tray icon when the desktop actually provides one.
@@ -712,10 +722,31 @@ class Window(QMainWindow):
         self.binding_title = QLabel('还差两步就可以开始检查作业'); self.binding_title.setObjectName('sectionTitle')
         self.binding_detail = QLabel(); self.binding_detail.setObjectName('muted'); self.binding_detail.setWordWrap(True)
         binding_copy.addWidget(self.binding_title); binding_copy.addWidget(self.binding_detail)
-        binding_row.addLayout(binding_copy); binding_row.addStretch()
+        # The copy must outrank the trailing stretch, or the label sinks to its
+        # minimum height and the wrapped last line gets clipped.
+        binding_row.addLayout(binding_copy, 1); binding_row.addStretch()
         self.binding_button = QPushButton('绑定慕课与邮箱'); self.binding_button.setObjectName('primary')
         self.binding_button.clicked.connect(self.open_binding); binding_row.addWidget(self.binding_button)
         overview_page.addWidget(self.binding)
+        # Filled in by refresh() from whatever the last check returned; hidden
+        # until there is something real to say.
+        self.notice = QFrame(); self.notice.setObjectName('card')
+        notice_row = QHBoxLayout(self.notice); notice_row.setContentsMargins(20, 16, 20, 16)
+        notice_copy = QVBoxLayout()
+        self.notice_title = QLabel(); self.notice_title.setObjectName('sectionTitle'); self.notice_title.setWordWrap(True)
+        self.notice_body = QLabel(); self.notice_body.setObjectName('muted'); self.notice_body.setWordWrap(True)
+        notice_copy.addWidget(self.notice_title); notice_copy.addWidget(self.notice_body)
+        # The body is prose of unknown length; without a minimum height the
+        # wrapped line gets clipped to a single row inside this row layout.
+        self.notice_title.setMinimumHeight(self.notice_title.sizeHint().height())
+        self.notice_body.setMinimumHeight(self.notice_body.fontMetrics().lineSpacing() * 2)
+        notice_row.addLayout(notice_copy, 1); notice_row.addStretch()
+        self.notice_action = QPushButton(); self.notice_action.setObjectName('primary')
+        self.notice_action.clicked.connect(self.open_notice); notice_row.addWidget(self.notice_action)
+        self.notice_dismiss = QPushButton('知道了'); self.notice_dismiss.clicked.connect(self.dismiss_notice)
+        notice_row.addWidget(self.notice_dismiss)
+        self.notice.setVisible(False)
+        overview_page.addWidget(self.notice)
         # Asked exactly once, here rather than in the middle of startup: turning
         # autostart on is the user's decision, and it should not stand between
         # them and the window they just asked for.
@@ -928,9 +959,13 @@ class Window(QMainWindow):
         bound = self.binding_state()
         self.binding.setVisible(not all(bound.values()))
         self.autostart.setVisible(not data['settings'].get('autostart_prompted') and not self.autostart_on)
+        self.refresh_notice()
         if not all(bound.values()):
             missing = [name for name, ok in (('慕课账号', bound['mooc']), ('接收提醒的邮箱', bound['email'])) if not ok]
             self.binding_detail.setText('尚未绑定：' + '、'.join(missing) + '。绑定后即可检查作业并收到提醒。')
+            # Set here, not when the card is built: the text is what makes the
+            # wrapped label tall, and without this the last line is clipped.
+            self.binding_detail.setMinimumHeight(self.binding_detail.sizeHint().height())
         self.scan.setEnabled(not data['busy'] and all(bound.values()))
         self.login.setEnabled(not data['busy'] and bound['mooc'])
         self.scan.setToolTip('' if all(bound.values()) else '请先绑定慕课账号与邮箱')
@@ -1134,6 +1169,133 @@ class Window(QMainWindow):
         self.last_signature = None
         self.refresh()
 
+    def start_notice_check(self, manual=False):
+        """Ask for the announcement file in the background, once per window.
+
+        The request is fire-and-forget: whatever comes back is stored for
+        refresh() to read, and a failure leaves ``notice_data`` alone so a
+        transient error cannot hide a notice that was already on screen.
+
+        Asking by hand (``manual``) ignores the opt-out, otherwise a user who
+        turned the automatic check off could never use the button under it.
+        """
+        if self.notice_busy:
+            return False
+        if not manual and not self.store.data['settings'].get('update_check', True):
+            return False
+        if hasattr(self, 'notice_button'):
+            self.notice_button.setEnabled(False)
+        self.notice_busy = True
+
+        def worker():
+            result = update_check.check()
+            # The thread carries the answer back through a queued timer rather
+            # than touching widgets, which only the GUI thread may do.
+            QTimer.singleShot(0, lambda: self.finish_notice_check(result, manual))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def finish_notice_check(self, result, manual=False):
+        self.notice_busy = False
+        if hasattr(self, 'notice_button'):
+            self.notice_button.setEnabled(True)
+        if result is None:
+            if manual:
+                self.status.setText('暂时连不上更新地址，可能没有网络；稍后再试即可。')
+            return
+        self.notice_data = result
+        self.notice_version = (result or {}).get('latest', '')
+        # Redrawn from scratch: the previous signature would otherwise hide a
+        # changed announcement.
+        self.notice_signature = None
+        if manual:
+            state = self.notice_state()
+            self.status.setText(f"已是最新版本（{VERSION}）" if state == 'none' else
+                                "程序已是最新版本，上面的提醒请留意。" if state == 'notice' else
+                                f"发现新版本 {self.notice_version}。")
+        self.refresh()
+
+    def notice_state(self):
+        """``'version'``, ``'notice'`` or ``'none'`` — what the card should say."""
+        data = self.notice_data or {}
+        if data.get('latest') and update_check.newer(data['latest']) and data.get('url'):
+            return 'version'
+        if self.visible_announcements():
+            return 'notice'
+        return 'none'
+
+    def visible_announcements(self):
+        seen = self.store.data['settings'].get('announcement_seen', [])
+        return update_check.unseen((self.notice_data or {}).get('announcements', []), seen)
+
+    def refresh_notice(self):
+        state = self.notice_state()
+        current = self.visible_announcements()
+        top = current[0] if current else {}
+        # Recomputed on every tick, so this must stay allocation-only: the
+        # widgets below are touched only when the answer changes.
+        signature = (state, self.notice_version, top.get('id'), top.get('title'), top.get('body'),
+                     top.get('link'), len(current), self.notice_busy)
+        if signature == self.notice_signature:
+            return
+        self.notice_signature = signature
+        self.notice.setVisible(state != 'none')
+        if state == 'none':
+            # Widgets under a hidden card are still "visible to" it, so they
+            # must be reset explicitly or the next card inherits their state.
+            self.notice_action.setVisible(True)
+            self.notice_dismiss.setVisible(True)
+            return
+        if state == 'version':
+            self.set_notice_title(f"有新版本 {self.notice_version}")
+            self.notice_body.setText((self.notice_data or {}).get('notes') or '下载新版本后，把程序文件夹解压覆盖即可；data 文件夹请保留。')
+            self.notice_action.setText('下载新版本')
+            self.notice_action.setVisible(True)
+            self.notice_dismiss.setVisible(False)
+        elif state == 'notice':
+            self.set_notice_title(top.get('title', ''), top.get('level') == 'warning')
+            self.notice_body.setText(top.get('body', ''))
+            self.notice_action.setText('查看详情')
+            self.notice_action.setVisible(bool(top.get('link')))
+            self.notice_dismiss.setText('知道了' if len(current) == 1 else f'知道了（还有 {len(current) - 1} 条）')
+            self.notice_dismiss.setVisible(True)
+    def set_notice_title(self, text, warning=False):
+        self.notice_title.setText(text)
+        self.notice_title.setStyleSheet('color:#b26a00' if warning else '')
+
+    def open_notice(self):
+        """Open the download page, or the announcement's link, in the browser."""
+        if self.notice_state() == 'version':
+            target = (self.notice_data or {}).get('url', '')
+        else:
+            current = self.visible_announcements()
+            target = current[0].get('link', '') if current else ''
+        if target:
+            if QDesktopServices.openUrl(QUrl(target)):
+                return True
+            # A machine without a default browser is rare but real; showing the
+            # address beats a button that does nothing.
+            self.status.setText(f'未能打开浏览器，请手动访问：{target}')
+            return False
+        return True
+
+    def dismiss_notice(self):
+        """Record the announcement so it never comes back, then show the next."""
+        current = self.visible_announcements()
+        if not current:
+            return
+        seen = list(self.store.data['settings'].get('announcement_seen', []))
+        seen.append(current[0]['id'])
+        try:
+            self.controller.settings(dict(announcement_seen=seen))
+            self.profiles.save_shared(self.store.data['settings'])
+        except Exception:
+            pass
+        self.notice_seen = current[0]['id']
+        self.notice_signature = None
+        self.refresh()
+
     def open_email_settings(self):
         """Reachable before signing in to MOOC, so the email can be set up first."""
         patch = self.edit_email_dialog()
@@ -1249,6 +1411,19 @@ class Window(QMainWindow):
         boot = QCheckBox('开机时自动启动（在系统托盘里运行）'); boot.setChecked(self.autostart_on)
         form.addRow(boot)
         layout.addLayout(form)
+        # Version and update live here because this is the only dialog users
+        # open by name; the card on 总览 does the same check automatically.
+        version_row = QHBoxLayout()
+        self.notice_button = QPushButton('检查更新'); self.notice_button.setFixedWidth(96)
+        self.notice_button.clicked.connect(lambda: self.start_notice_check(manual=True))
+        version_label = QLabel(f'当前版本 {VERSION}'); version_label.setObjectName('muted')
+        update_auto = QCheckBox('自动检查更新与公告'); update_auto.setChecked(settings.get('update_check', True))
+        version_row.addWidget(version_label); version_row.addWidget(update_auto); version_row.addStretch()
+        version_row.addWidget(self.notice_button); layout.addLayout(version_row)
+        update_note = QLabel('检查时只向一个固定地址取一次版本与公告文件，不上传任何账号数据；关闭后，'
+                             '只有在上面点“检查更新”时才会请求。')
+        update_note.setObjectName('muted'); update_note.setWordWrap(True); layout.addWidget(update_note)
+        update_auto.setToolTip('关闭后不再自动请求版本与公告')
         # The two kinds of mail are independent, which is not obvious from the
         # field labels alone: users could not tell which time actually sends.
         reminder_note=QLabel('“提前提醒”：作业还剩上面这些小时数时，立刻发一封提醒邮件，可填多个（用逗号分开）。')
@@ -1261,7 +1436,7 @@ class Window(QMainWindow):
         save=QPushButton('保存设置');save.setObjectName('primary');layout.addWidget(save)
         def apply():
             try:
-                warnings=self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),email=mail.values()))
+                warnings=self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),update_check=update_auto.isChecked(),email=mail.values()))
                 self.profiles.save_shared(self.store.data['settings'])
             except Exception as exc:
                 QMessageBox.warning(dialog,'设置未保存',str(exc));return
@@ -1273,6 +1448,7 @@ class Window(QMainWindow):
             dialog.accept();self.refresh()
             self.status.setText('设置已保存。'+('　'+'　'.join(warnings) if warnings else ''))
         save.clicked.connect(apply);dialog.exec()
+        self.notice_button = None
 
     def mailer_idle(self):
         return not self.controller.mailer.inflight

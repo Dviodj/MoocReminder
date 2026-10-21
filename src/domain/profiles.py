@@ -17,14 +17,16 @@ from pathlib import Path
 import re
 import tempfile
 
-from core import DEFAULT_SETTINGS, account_id, binding_state as core_binding_state, is_bound, valid_home_url
+from core import (DEFAULT_SETTINGS, SOFT_SETTING_KEYS, account_id, binding_state as core_binding_state,
+                  is_bound, valid_home_url)
 from storage import Store, default_data_dir, normalize_email_settings
 
 APP_FILE = 'app.json'
 ACCOUNTS_DIR = 'accounts'
 # Settings that describe how the program behaves, not who it is.
 GLOBAL_KEYS = ('interval_minutes', 'reminder_hours', 'include_quizzes', 'include_finished',
-               'autostart_prompted')
+               'autostart_prompted', 'update_check')
+
 FORMAT = 2
 
 
