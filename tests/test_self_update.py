@@ -210,6 +210,16 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(item['README.md'])
         self.assertFalse(item['NEWS.md'])
 
+    def test_the_folder_the_program_is_started_from_is_never_replaced(self):
+        # A source checkout runs on .build/runtime-bundle/python, which the
+        # shortcut names: swapping anything there leaves it holding the old code.
+        staged = self.temp / 'stage'
+        for name in ('src', '.build', 'runtime-bundle'):
+            (staged / name).mkdir(parents=True)
+        names = self_update.plan(self.workspace, staged)['swap']
+        self.assertNotIn('.build', names)
+        self.assertIn('src', names)
+
 
 class SwitchTests(unittest.TestCase):
     """The switch itself: what is replaced, what survives, and what undo does."""
@@ -312,6 +322,15 @@ class CommandTests(unittest.TestCase):
         command = self_update.restart_command(Path('C:/x'))
         self.assertIn(str(Path('C:/x') / 'src/system/source_launcher.py'), command)
         self.assertIn('--background', command)
+
+    def test_the_switch_script_can_still_switch_if_the_new_module_will_not_load(self):
+        # The script runs the *new* program's module; if that one cannot be
+        # imported, the old one has to finish the job rather than leave a half
+        # moved program behind.
+        command = self_update.script_command(Path('C:/x'), Path('C:/x/plan.json'), Path('C:/x/report.json'))
+        text = command[-1]
+        self.assertIn('except Exception:', text)
+        self.assertIn(repr(str(Path(self_update.__file__).resolve().parent)), text)
 
     def test_a_source_checkout_without_a_bundle_can_still_download(self):
         temp = _bootstrap.scratch_folder('self-update-support')

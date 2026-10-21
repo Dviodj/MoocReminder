@@ -63,8 +63,12 @@ WORK_FOLDER = '.update'
 #: antivirus or a stuck handle holds one of them.
 SWAPPED = ('src', 'assets', 'runtime-bundle')
 #: Top-level names the release ships that are also the user's, and must survive.
-PROTECTED = ('data', '.launcher-state', '.venv', '.build', '.git', 'email_sender.json',
-             'usage_report.json', 'web-profiles')
+PROTECTED = ('data', '.launcher-state', '.venv', '.git', 'email_sender.json',
+             'usage_report.json', 'web-profiles',
+             # A source checkout starts from the interpreter the .vbs and
+             # launch.bat name, which lives in .build; swapping anything here
+             # would leave that folder holding the old program.
+             '.build')
 
 
 class UpdateError(Exception):
@@ -392,13 +396,23 @@ def undo(replaced, written):
 #: The switch is run by a short script instead of by this process: the folder
 #: being renamed holds the program currently running, and a separate interpreter
 #: holds no handle on it.
+#:
+#: The script imports the new program's own copy of this module, so a switch
+#: written by an older version reads its plan with the new rules. A module that
+#: fails to import -- missing, or newer than the running interpreter -- is no
+#: reason to leave the old program half moved, so the retry falls back to the
+#: program that asked for the switch.
 SCRIPT = '''import json, sys
 sys.path.insert(0, {source})
 from pathlib import Path
-import self_update
 plan = json.loads(Path({plan_path}).read_text(encoding='utf-8'))
-ok, error, _ = self_update.apply(plan)
 report = Path({report_path})
+try:
+    from self_update import apply
+except Exception:
+    sys.path.insert(0, {fallback})
+    from self_update import apply
+ok, error, _ = apply(plan)
 report.write_text(json.dumps(dict(ok=ok, error=error)), encoding='utf-8')
 '''
 
@@ -407,7 +421,8 @@ def script_command(workspace, plan_path, report_path):
     """The command line that performs the switch, using the program's interpreter."""
     source = Path(workspace) / 'src' / 'system'
     program = SCRIPT.format(source=repr(str(source)), plan_path=repr(str(plan_path)),
-                            report_path=repr(str(report_path)))
+                            report_path=repr(str(report_path)),
+                            fallback=repr(str(Path(__file__).resolve().parent)))
     python = Path(sys.executable)
     windowless = python.with_name('pythonw.exe')
     if windowless.is_file():
