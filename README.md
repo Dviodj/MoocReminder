@@ -1,4 +1,4 @@
-# MoocReminder v0.2.2
+# MoocReminder v0.2.3
 
 把 MOOC 作业的截止时间集中起来，在忘记提交之前提醒你。
 
@@ -46,9 +46,9 @@
 ### 使用步骤
 
 1. 下载 **便携包**
-   （[MoocReminder-v0.2.2-offline-x64.zip](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.2/MoocReminder-v0.2.2-offline-x64.zip)，
+   （[MoocReminder-v0.2.3-offline-x64.zip](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.3/MoocReminder-v0.2.3-offline-x64.zip)，
    压缩包约 248 MB，解压后约 669 MB）并解压出完整文件夹，解压即用；想自己装依赖的话，
-   也可以用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.2/MoocReminder-v0.2.2-source.zip)。
+   也可以用 [源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.3/MoocReminder-v0.2.3-source.zip)。
 2. 双击 **启动MoocReminder.bat**，启动窗口会显示进度，随后弹出登录窗。
 3. 第一次使用点 **注册账号**，只填一个账号名称（例如「主账号」）即可进入。
 4. 进入后点 **绑定慕课与邮箱**，填入课程主页链接 `https://www.icourse163.org/home.htm?userId=你的数字账号#/home/course` 和接收提醒的邮箱。这两步完成前无法检查作业。
@@ -108,7 +108,7 @@
 
 想了解大概有多少人在用，程序提供一个**完全自愿**的统计开关，在 **提醒设置** 里勾选 **参与使用人数统计** 才会生效；不勾选就一个请求都不会发出。
 
-- 勾选后，程序**每天最多一次**在发布者的一个公开页面上留一条评论，内容只有两样：一个**本机随机生成的编号**和**当前版本号**（例如 `` `c1f0…` v0.2.2 ``）。
+- 勾选后，程序**每天最多一次**在发布者的一个公开页面上留一条评论，内容只有两样：一个**本机随机生成的编号**和**当前版本号**（例如 `` `c1f0…` v0.2.3 ``）。
 - **不含**邮箱、课程、作业、账号名、电脑名、使用时长等任何信息，也不含任何可以用来联系你的内容。这个编号只用来避免同一天重复计数，不同账号、不同电脑之间毫无关联，也不是由你的机器信息推算出来的。
 - 取消勾选会**一并删掉本机保存的编号**，之后不再发送。
 - 留下的是发布者仓库里的一个 issue，所以**所有人都在同一个公开页面上**，每台设备一条评论。发布者关闭该 issue 即可停止统计。
@@ -130,7 +130,7 @@
 
 官网未明确显示提交状态的条目会标为“请核对”。程序读取的是作业提交截止时间，互评截止时间不会列入提交提醒。
 
-需要较小的下载或进行开发时，也可使用 [v0.2.2 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.2/MoocReminder-v0.2.2-source.zip)。源码包不含内置运行环境，需要机器上已有 64 位 Python 3.11–3.15，并由使用者自行安装依赖；便携包把这些都放在发布前完成。
+需要较小的下载或进行开发时，也可使用 [v0.2.3 源码包](https://github.com/Dviodj/MoocReminder/releases/download/v0.2.3/MoocReminder-v0.2.3-source.zip)。源码包不含内置运行环境，需要机器上已有 64 位 Python 3.11–3.15，并由使用者自行安装依赖；便携包把这些都放在发布前完成。
 
 ## 本地数据与问题排查
 

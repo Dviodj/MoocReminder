@@ -1,3 +1,3 @@
 """Shared product identity."""
 APP_NAME = 'MoocReminder'
-VERSION = 'v0.2.2'
+VERSION = 'v0.2.3'
