@@ -74,7 +74,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(RELEASE['html_url'], got['url'])
         self.assertEqual('修好桌面上快捷方式的图标。', got['notes'])
         self.assertEqual([], got['announcements'])
-        self.assertTrue(newer(got['latest']))
+        # Compare against a fixed baseline: this test is about reading a release,
+        # not about which version the checkout happens to be on today.
+        self.assertTrue(newer(got['latest'], 'v0.2.1'))
 
     def test_announcements_are_read_from_their_own_block(self):
         body = '\n'.join([
