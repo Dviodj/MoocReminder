@@ -736,10 +736,6 @@ class Window(QMainWindow):
         self.notice_title = QLabel(); self.notice_title.setObjectName('sectionTitle'); self.notice_title.setWordWrap(True)
         self.notice_body = QLabel(); self.notice_body.setObjectName('muted'); self.notice_body.setWordWrap(True)
         notice_copy.addWidget(self.notice_title); notice_copy.addWidget(self.notice_body)
-        # The body is prose of unknown length; without a minimum height the
-        # wrapped line gets clipped to a single row inside this row layout.
-        self.notice_title.setMinimumHeight(self.notice_title.sizeHint().height())
-        self.notice_body.setMinimumHeight(self.notice_body.fontMetrics().lineSpacing() * 2)
         notice_row.addLayout(notice_copy, 1); notice_row.addStretch()
         self.notice_action = QPushButton(); self.notice_action.setObjectName('primary')
         self.notice_action.clicked.connect(self.open_notice); notice_row.addWidget(self.notice_action)
@@ -757,7 +753,7 @@ class Window(QMainWindow):
         prompt_detail = QLabel('开启后，登录 Windows 就会在托盘里自动运行，不用每次自己打开；'
                                '随时可以在“提醒设置”里关掉。'); prompt_detail.setObjectName('muted'); prompt_detail.setWordWrap(True)
         prompt_copy.addWidget(prompt_title); prompt_copy.addWidget(prompt_detail)
-        prompt_row.addLayout(prompt_copy); prompt_row.addStretch()
+        prompt_row.addLayout(prompt_copy, 1); prompt_row.addStretch()
         self.autostart_yes = QPushButton('开启开机自启'); self.autostart_yes.setObjectName('primary')
         self.autostart_yes.clicked.connect(self.accept_autostart); prompt_row.addWidget(self.autostart_yes)
         self.autostart_no = QPushButton('不用了'); self.autostart_no.clicked.connect(self.decline_autostart)
@@ -1006,6 +1002,7 @@ class Window(QMainWindow):
         self.overview_more.setVisible(bool(upcoming))
         if not upcoming:
             self.overview_list.setText('暂时没有待完成的作业。<br>绑定慕课账号与邮箱后，点“检查作业”就能读到它们。')
+            self.fit_wrapped(self.overview_list)
             return
         blocks = []
         for item in upcoming:
@@ -1016,6 +1013,22 @@ class Window(QMainWindow):
                 f'<span style="color:#849bc0">截止 {html.escape(str(item["deadline_label"]))} · '
                 f'剩余 {html.escape(str(item["remaining"]))}</span></div>')
         self.overview_list.setText(''.join(blocks))
+        self.fit_wrapped(self.overview_list)
+
+    def fit_wrapped(self, label, width=None):
+        """Give a word-wrapped label the height its current width really needs.
+
+        A wrapped label reports a one-line hint, so a vertical layout with a
+        stretch below it hands the label one line and clips everything after
+        it. Call this after every setText, once the width is known.
+        """
+        if width is None:
+            width = label.width()
+        if width <= 0:
+            parent = label.parentWidget()
+            width = max(parent.width() - 60, 200) if parent is not None else 400
+        needed = label.heightForWidth(width) if label.text() else 0
+        label.setMinimumHeight(max(needed, label.fontMetrics().lineSpacing()))
 
     def fill_courses(self, courses):
         self.course_rows = list(courses)
@@ -1260,6 +1273,32 @@ class Window(QMainWindow):
             self.notice_action.setVisible(bool(top.get('link')))
             self.notice_dismiss.setText('知道了' if len(current) == 1 else f'知道了（还有 {len(current) - 1} 条）')
             self.notice_dismiss.setVisible(True)
+        self.fit_notice_text()
+
+    def fit_notice_text(self):
+        """Give the wrapped notice text the height its width actually needs.
+
+        A word-wrapped label reports a one-line hint, so inside this row it is
+        given a single line and anything past it is clipped. The needed height
+        depends on the width the card ends up with, so it is recomputed from the
+        current width every time rather than once at construction: an
+        announcement is prose of unknown length, and the window can be resized.
+        """
+        width = self.notice_body.width()
+        if width <= 0:
+            width = max(self.notice.width() - 200, 200)
+        for label in (self.notice_title, self.notice_body):
+            self.fit_wrapped(label, width)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Wrapped prose re-flows at a new width, so every place that holds text
+        # of unknown length is re-measured here rather than once at build time.
+        if getattr(self, 'notice', None) is not None:
+            self.notice_signature = None
+            self.refresh_notice()
+            self.fit_wrapped(self.overview_list)
+
     def set_notice_title(self, text, warning=False):
         self.notice_title.setText(text)
         self.notice_title.setStyleSheet('color:#b26a00' if warning else '')

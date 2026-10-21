@@ -742,12 +742,46 @@ class NoticeCardTests(unittest.TestCase):
         self.assertTrue(self.window.notice_action.isVisibleTo(self.window.notice))
         self.assertTrue(self.window.notice_dismiss.isVisibleTo(self.window.notice))
 
-    def test_an_announcement_body_gets_room_for_a_wrapped_line(self):
-        # A one-line minimum in this row layout clipped the second line, which
-        # read as a truncated announcement.
-        self.deliver(announcements=[dict(id='a1', title='标题', body='一二三四五', link='', level='info')])
-        line = self.window.notice_body.fontMetrics().lineSpacing()
-        self.assertGreaterEqual(self.window.notice_body.minimumSizeHint().height(), line * 2)
+    def test_an_announcement_body_gets_room_for_every_wrapped_line(self):
+        # A one-line minimum in this row layout clipped the announcement at its
+        # first line, which read as a truncated notice. The room must come from
+        # the text's real height at the card's width, not from a fixed guess.
+        body = ('本软件旨在帮助同学们避免忘记完成慕课作业而白白丢分。目前的版本完全依赖本地运行，'
+                '没有服务器，所以还请各位每隔几天打开一下软件，会自动补发提醒邮件，或设置为开机自启。'
+                '第一次尝试制作这种软件，经验不足。反馈问题 moocreminder@foxmail.com')
+        self.window.show()
+        QApplication.processEvents()
+        try:
+            self.deliver(announcements=[dict(id='a1', title='标题', body=body, link='', level='info')])
+            QApplication.processEvents()
+            label = self.window.notice_body
+            needed = label.heightForWidth(label.width())
+            self.assertGreater(needed, label.fontMetrics().lineSpacing())
+            self.assertGreaterEqual(label.minimumHeight(), needed)
+            self.assertGreaterEqual(label.height(), needed)
+        finally:
+            self.window.hide()
+
+    def test_a_narrow_window_reflows_the_announcement_instead_of_clipping_it(self):
+        # The height is recomputed on resize; a fixed one would clip the extra
+        # lines the narrower width creates.
+        body = ('本软件旨在帮助同学们避免忘记完成慕课作业而白白丢分。目前的版本完全依赖本地运行，'
+                '没有服务器，所以还请各位每隔几天打开一下软件，会自动补发提醒邮件，或设置为开机自启。'
+                '第一次尝试制作这种软件，经验不足。反馈问题 moocreminder@foxmail.com')
+        self.window.resize(1240, 900)
+        self.window.show()
+        QApplication.processEvents()
+        try:
+            self.deliver(announcements=[dict(id='a1', title='标题', body=body, link='', level='info')])
+            QApplication.processEvents()
+            wide = self.window.notice_body.minimumHeight()
+            self.window.resize(760, 900)
+            QApplication.processEvents()
+            label = self.window.notice_body
+            self.assertGreater(label.minimumHeight(), wide)
+            self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+        finally:
+            self.window.hide()
 
     def test_the_binding_card_leaves_the_last_line_visible(self):
         # The card used to collapse to its minimum height and clip the tail of

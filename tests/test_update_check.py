@@ -5,7 +5,7 @@ import unittest
 import urllib.error
 
 import update_check
-from update_check import from_release, newer, parse, unseen, version_tuple
+from update_check import from_page, from_release, newer, parse, unseen, version_tuple
 
 RELEASE = {
     'tag_name': 'v0.2.2',
@@ -44,7 +44,7 @@ class ParseTests(unittest.TestCase):
                      'announcements': [{'id': 'a', 'title': '标题', 'body': '正文', 'level': 'warning'}]})
         self.assertEqual('v0.2.2', got['latest'])
         self.assertEqual('改了什么', got['notes'])
-        self.assertEqual([dict(id='a', title='标题', body='正文', link='', level='warning')],
+        self.assertEqual([dict(id='a', title='标题', body='正文', link='', level='warning', pinned=False)],
                          got['announcements'])
 
     def test_junk_in_the_document_is_dropped_not_raised(self):
@@ -275,6 +275,33 @@ class UnseenTests(unittest.TestCase):
         self.assertEqual(self.ITEMS, unseen(self.ITEMS, None))
         # A single id is still accepted, so a hand-edited file cannot crash it.
         self.assertEqual(['new'], [item['id'] for item in unseen(self.ITEMS, 'old')])
+
+    def test_a_pinned_announcement_is_shown_before_later_ones(self):
+        items = [dict(id='pin', pinned=True), dict(id='later')]
+        self.assertEqual(['pin', 'later'], [item['id'] for item in unseen(items, [])])
+        items = [dict(id='later'), dict(id='pin', pinned=True)]
+        self.assertEqual(['pin', 'later'], [item['id'] for item in unseen(items, [])])
+
+    def test_a_pinned_announcement_still_goes_away_when_dismissed(self):
+        # Pinned means "shown first", not "impossible to close".
+        items = [dict(id='pin', pinned=True), dict(id='later')]
+        self.assertEqual(['later'], [item['id'] for item in unseen(items, ['pin'])])
+
+    def test_only_an_explicit_true_pins(self):
+        parsed = parse(dict(announcements=[
+            dict(id='one', title='一', pinned=True),
+            dict(id='two', title='二', pinned='yes'),
+            dict(id='three', title='三'),
+        ]))
+        self.assertEqual([True, False, False], [item['pinned'] for item in parsed['announcements']])
+        order = [item['id'] for item in unseen(parsed['announcements'], [])]
+        self.assertEqual(['one', 'two', 'three'], order)
+
+    def test_the_pinned_flag_survives_the_release_page(self):
+        page = ('<pre lang="mooc-reminder-announcements">[{&quot;id&quot;: &quot;welcome&quot;, '
+                '&quot;title&quot;: &quot;欢迎&quot;, &quot;pinned&quot;: true}]</pre>')
+        doc = from_page('v0.2.2', page)
+        self.assertTrue(doc['announcements'][0]['pinned'])
 
 
 if __name__ == '__main__':

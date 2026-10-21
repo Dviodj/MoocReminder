@@ -123,10 +123,14 @@ def parse(payload):
         level = entry.get('level')
         body = entry.get('body')
         link = entry.get('link')
+        # Anything other than an explicit true is treated as not pinned, so a
+        # stray "" or "no" cannot pin somebody's notice by accident.
+        pinned = entry.get('pinned') is True
         announcements.append(dict(id=key.strip(), title=title.strip()[:200],
                                   body=body.strip()[:MAX_TEXT] if isinstance(body, str) else '',
                                   link=link.strip() if isinstance(link, str) and link.strip().startswith('https://') else '',
-                                  level=level if level in LEVELS else 'info'))
+                                  level=level if level in LEVELS else 'info',
+                                  pinned=pinned))
     return dict(latest=latest, url=url, notes=notes, announcements=announcements[:MAX_ANNOUNCEMENTS])
 
 
@@ -360,12 +364,20 @@ def from_page(tag, page):
 
 
 def unseen(announcements, seen=''):
-    """Announcements the user has not dismissed yet, oldest first.
+    """Announcements the user has not dismissed yet, the pinned one first.
 
     ``seen`` is a list of ids; a single id is accepted too, because the setting
     started life as one string and readers may still hold that.
+
+    Dismissal is per id, so a pinned notice would otherwise be "most recent
+    wins" like every other one. Someone who wants it to stay in front of
+    everybody — a welcome message, an outage warning — marks it ``pinned``: it
+    is shown first even when newer announcements arrive, and it still goes away
+    for good once dismissed.
     """
     if isinstance(seen, str):
         seen = [seen] if seen else []
     dismissed = set(seen or ())
-    return [item for item in announcements if item['id'] not in dismissed]
+    left = [item for item in announcements if item['id'] not in dismissed]
+    pinned = [item for item in left if item.get('pinned')]
+    return pinned + [item for item in left if not item.get('pinned')]
