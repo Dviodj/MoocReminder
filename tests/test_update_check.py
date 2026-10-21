@@ -2,6 +2,7 @@ import _bootstrap  # noqa: F401  (puts src/ on sys.path)
 
 import json
 import unittest
+import urllib.error
 
 import update_check
 from update_check import from_release, newer, parse, unseen, version_tuple
@@ -11,6 +12,11 @@ RELEASE = {
     'html_url': 'https://github.com/Dviodj/MoocReminder/releases/tag/v0.2.2',
     'body': '修好桌面上快捷方式的图标。\n\n更多细节见页面。',
 }
+
+
+def _unreachable(request, timeout):
+    """An opener that always fails the way an offline machine does."""
+    raise OSError('no route to host')
 
 
 class VersionTests(unittest.TestCase):
@@ -161,9 +167,99 @@ class TransportTests(unittest.TestCase):
         self.assertIsNone(update_check.check(('https://a',), opener=lambda *a, **k: Empty()))
 
     def test_a_real_network_failure_reaches_the_caller_as_none(self):
-        # No mocking: pointing at a host that will not resolve is the offline
-        # case users actually hit, and it must not raise.
-        self.assertIsNone(update_check.check(('https://no-such-host.invalid/announce.json',), timeout=2))
+        # No mocking: a host that will not resolve is the offline case users
+        # actually hit, and it must not raise.  The redirect is consulted first,
+        # so this also covers "nothing answers at all".
+        self.assertIsNone(update_check.latest_tag(timeout=2, opener=_unreachable))
+        self.assertIsNone(update_check.fetch(('https://no-such-host.invalid/a',), timeout=2, opener=_unreachable))
+
+
+class RedirectTests(unittest.TestCase):
+    """The tag comes from where ``/releases/latest`` points, not from the API.
+
+    The REST API was the first design and it was wrong: unauthenticated calls are
+    limited to 60 per hour *per IP*, so a whole dorm behind one NAT address would
+    exhaust the budget between them.  The redirect is not limited that way.
+    """
+
+    def test_the_redirect_names_the_tag(self):
+        def opener(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url, 302, 'Found', {'Location': 'https://github.com/Dviodj/MoocReminder/releases/tag/v0.9.1'}, None)
+
+        self.assertEqual('v0.9.1', update_check.latest_tag(opener=opener))
+
+    def test_a_followed_redirect_names_the_tag(self):
+        class Landed:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def geturl(self):
+                return 'https://github.com/Dviodj/MoocReminder/releases/tag/v0.9.1'
+
+        self.assertEqual('v0.9.1', update_check.latest_tag(opener=lambda *a, **k: Landed()))
+
+    def test_a_redirect_elsewhere_is_not_a_version(self):
+        def opener(request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 302, 'Found', {'Location': 'https://github.com/login'}, None)
+
+        self.assertIsNone(update_check.latest_tag(opener=opener))
+
+    def test_no_answer_means_no_tag(self):
+        def opener(request, timeout):
+            raise OSError('offline')
+
+        self.assertIsNone(update_check.latest_tag(opener=opener))
+
+
+class PageTests(unittest.TestCase):
+    # As GitHub serves it: the fenced block is a <pre> tagged with the language,
+    # and its text arrives with real quotes (the entity escaping in the raw
+    # markup is resolved by the HTML parser before the reader sees it).
+    BLOCK = '[{"id": "2026-10-21", "title": "标题", "body": "正文"}]'
+    PAGE = (
+        '<html><head><script>{"crumb":"Dviodj"}</script></head><body>'
+        '<nav><p>Sign in</p></nav>'
+        '<div class="markdown-body"><p>本次提供便携包与源码包</p>'
+        '<pre lang="mooc-reminder-announcements" class="notranslate"><code>'
+        + BLOCK +
+        '</code></pre></div></body></html>'
+    )
+
+    def test_announcements_are_read_from_their_tagged_block(self):
+        got = update_check.announcements_in_page(self.PAGE)
+        self.assertEqual(['2026-10-21'], [item['id'] for item in got])
+        self.assertEqual('正文', got[0]['body'])
+
+    def test_the_card_takes_the_first_line_of_the_notes(self):
+        self.assertEqual('本次提供便携包与源码包', update_check.release_notes(self.PAGE))
+
+    def test_a_page_without_notes_yields_nothing(self):
+        self.assertEqual('', update_check.release_notes('<html><body>nope</body></html>'))
+        self.assertEqual([], update_check.announcements_in_page('<html></html>'))
+        self.assertEqual([], update_check.announcements_in_page(None))
+
+    def test_a_truncated_block_is_ignored_not_fatal(self):
+        page = '<div class="markdown-body"><pre lang="mooc-reminder-announcements">[{oops'
+        self.assertEqual([], update_check.announcements_in_page(page))
+
+    def test_an_escaped_block_is_still_read(self):
+        # Some renderers hand over the entities untouched.  The parser must put
+        # them back rather than dropping them, or `&quot;` disappears and the
+        # JSON is not JSON any more.  Only the block's text is escaped here: the
+        # attributes around it stay real markup.
+        escaped = PageTests.BLOCK.replace('"', '&quot;')
+        page = PageTests.PAGE.replace(PageTests.BLOCK, escaped)
+        self.assertEqual(['2026-10-21'], [item['id'] for item in update_check.announcements_in_page(page)])
+
+    def test_a_release_page_becomes_a_document(self):
+        got = update_check.from_page('v0.9.1', self.PAGE)
+        self.assertEqual('v0.9.1', got['latest'])
+        self.assertTrue(got['url'].endswith('/releases/tag/v0.9.1'))
+        self.assertEqual(['2026-10-21'], [item['id'] for item in got['announcements']])
 
 
 class UnseenTests(unittest.TestCase):
