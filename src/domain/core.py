@@ -32,10 +32,20 @@ DEFAULT_SETTINGS = dict(home_url=HOME_URL, manual_urls=[], interval_minutes=30,
                         # by default, so the manual "检查更新" button uses this
                         # setting exactly like the automatic check does.
                         update_check=True,
+                        # What the anonymous "someone is using this" ping did
+                        # last, as plain data: {key, day, last_error}. Empty
+                        # until the first attempt. It carries no identity —
+                        # only this machine's own bookkeeping.
+                        usage_status={},
                         email=dict(enabled=False, recipient='', sender='', server='', port=465,
                                    security='ssl', password='', digest_times=[],
                                    digest_frequency='daily', digest_weekday=0,
                                    digest_interval=DEFAULT_DIGEST_INTERVAL))
+
+# The anonymous usage ping is opt-in: an empty install ID means "do not send",
+# and only an explicit yes fills it in. Nothing about the machine goes into it.
+USAGE_ENABLED_KEY = 'usage_report'
+USAGE_STATUS_KEY = 'usage_status'
 
 # Per-account settings the program may add later: an older data.json simply
 # lacks them, and the defaults fill the gap. They are still validated, so a

@@ -105,6 +105,9 @@ class Store:
                 for key in SOFT_SETTING_KEYS:
                     if key not in settings:
                         settings[key] = deepcopy(DEFAULT_SETTINGS[key])
+                # Written by an older version that predates the usage ping, and
+                # absent from hand-edited files; both mean "never asked".
+                settings.setdefault('usage_report', '')
                 if (not isinstance(settings['home_url'], str) or not valid_home_url(settings['home_url']) or
                     not isinstance(settings['interval_minutes'], int) or not 5 <= settings['interval_minutes'] <= 1440 or
                     not isinstance(settings['reminder_hours'], list) or not settings['reminder_hours'] or
@@ -112,6 +115,9 @@ class Store:
                     not isinstance(settings['manual_urls'], list) or any(not isinstance(u, str) for u in settings['manual_urls']) or
                     not isinstance(settings['announcement_seen'], list) or any(not isinstance(s, str) for s in settings['announcement_seen']) or
                     not isinstance(settings['update_check'], bool) or
+                    not isinstance(settings.get('usage_report'), str) or
+                    not isinstance(settings['usage_status'], dict) or
+                    not all(isinstance(v, str) for v in settings['usage_status'].values()) or
                     not isinstance(candidate['completed'], list) or not isinstance(candidate['reminders'], dict) or
                     not isinstance(candidate.get('digest_state', {}), dict) or
                     not isinstance(candidate['courses'], list) or not isinstance(candidate['errors'], list)):

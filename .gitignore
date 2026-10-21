@@ -30,6 +30,8 @@ data/
 # The publisher's sender configuration carries an SMTP credential; only the
 # empty example is tracked.
 email_sender.json
+# The publisher's usage-count writing credential, shipped the same way.
+usage_report.json
 .env
 .env.*
 *.pem

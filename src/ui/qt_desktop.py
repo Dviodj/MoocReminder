@@ -35,6 +35,7 @@ import mail_guide
 import mail_log
 import profiles as profiles_module
 import update_check
+import usage_ping
 from core import (DEFAULT_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, WEEKDAY_NAMES,
                   account_id, binding_state as core_binding_state, digest_cadence_text, next_digest_day,
                   now_beijing)
@@ -596,12 +597,21 @@ class Tray(QSystemTrayIcon):
 
 
 class Window(QMainWindow):
+    # A worker thread cannot redraw the window, and QTimer.singleShot started
+    # from one is never delivered at all (Qt needs a timer that belongs to a
+    # live object in the GUI thread). Every background answer therefore comes
+    # back through one of these signals, which Qt queues across threads.
+    notice_ready = Signal(object, bool)
+    usage_ready = Signal(object)
+
     def __init__(self, store, profiles=None, tray=True):
         super().__init__()
         self.store = store
         self.profiles = profiles or profiles_module.Profiles(profiles_module.folder_for_store(store.folder))
         self.workspace = paths.PROGRAM_ROOT
         self._email_dialog = None
+        self.notice_ready.connect(self.finish_notice_check)
+        self.usage_ready.connect(self.finish_usage_ping)
         self.tray = None
         self.quitting = False
         # Read once and cached: answering this means a PowerShell round trip, and
@@ -633,6 +643,7 @@ class Window(QMainWindow):
         # Asked after the window is up, not before: nothing the network says
         # may delay the window the user just opened.
         self.start_notice_check()
+        self.start_usage_ping()
 
     def create_tray(self):
         """Add the tray icon when the desktop actually provides one.
@@ -1202,9 +1213,9 @@ class Window(QMainWindow):
 
         def worker():
             result = update_check.check()
-            # The thread carries the answer back through a queued timer rather
-            # than touching widgets, which only the GUI thread may do.
-            QTimer.singleShot(0, lambda: self.finish_notice_check(result, manual))
+            # Emitted, not painted: the signal crosses threads and Qt delivers
+            # it back on the GUI thread, which is the only thread allowed here.
+            self.notice_ready.emit(result, manual)
 
         threading.Thread(target=worker, daemon=True).start()
         return True
@@ -1228,6 +1239,38 @@ class Window(QMainWindow):
                                 "程序已是最新版本，上面的提醒请留意。" if state == 'notice' else
                                 f"发现新版本 {self.notice_version}。")
         self.refresh()
+
+    def start_usage_ping(self):
+        """Count this install once a day, only if the user turned it on.
+
+        Nothing is sent until the checkbox in 提醒设置 is ticked, and the id it
+        sends is random and local: it says "one more install" and nothing else.
+        """
+        status = self.store.data['settings'].get('usage_status') or {}
+        # The write credential ships beside the program, not in the source, and
+        # "is there anywhere to write" is part of deciding whether a ping is due.
+        usage_ping.load_credentials(paths.PROGRAM_ROOT)
+        if not isinstance(status, dict) or not usage_ping.due(status):
+            return False
+
+        def worker():
+            answered = usage_ping.report(status)
+            self.usage_ready.emit(answered)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def finish_usage_ping(self, status):
+        """Keep the date of the attempt so the rest of the day stays quiet."""
+        if status == (self.store.data['settings'].get('usage_status') or {}):
+            return
+        try:
+            self.controller.settings(dict(usage_status=status))
+            self.profiles.save_shared(self.store.data['settings'])
+        except Exception:
+            # A failed bookkeeping write must not surface: nothing the user
+            # asked for depends on it, and the next launch simply tries again.
+            pass
 
     def notice_state(self):
         """``'version'``, ``'notice'`` or ``'none'`` — what the card should say."""
@@ -1463,6 +1506,17 @@ class Window(QMainWindow):
                              '只有在上面点“检查更新”时才会请求。')
         update_note.setObjectName('muted'); update_note.setWordWrap(True); layout.addWidget(update_note)
         update_auto.setToolTip('关闭后不再自动请求版本与公告')
+        # Opt-in and separate from the update check: counting is a different
+        # promise from fetching a version, so it gets its own question.
+        usage_row = QHBoxLayout()
+        usage_ok = QCheckBox('参与使用人数统计（可选）')
+        usage_ok.setChecked(bool((settings.get('usage_status') or {}).get('install')))
+        usage_ok.setToolTip('每天最多一次；不勾选时不会发出任何请求')
+        usage_row.addWidget(usage_ok); usage_row.addStretch(); layout.addLayout(usage_row)
+        usage_note = QLabel('勾选后，程序每天最多一次在发布者的一个公开页面上留一条评论，'
+                            '内容只有一个随机生成的编号和当前版本号，用来了解有多少台设备在用；'
+                            '不含邮箱、课程、账号或任何能认出你的信息，取消勾选会一并删掉本机保存的编号。')
+        usage_note.setObjectName('muted'); usage_note.setWordWrap(True); layout.addWidget(usage_note)
         # The two kinds of mail are independent, which is not obvious from the
         # field labels alone: users could not tell which time actually sends.
         reminder_note=QLabel('“提前提醒”：作业还剩上面这些小时数时，立刻发一封提醒邮件，可填多个（用逗号分开）。')
@@ -1475,7 +1529,8 @@ class Window(QMainWindow):
         save=QPushButton('保存设置');save.setObjectName('primary');layout.addWidget(save)
         def apply():
             try:
-                warnings=self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),update_check=update_auto.isChecked(),email=mail.values()))
+                usage_status = self.usage_status_from(usage_ok.isChecked())
+                warnings=self.controller.settings(dict(home_url=home.text().strip(),reminder_hours=[float(v.strip()) for v in hours.text().replace('，',',').split(',')],interval_minutes=interval.value(),manual_urls=[v.strip() for v in manual.toPlainText().splitlines() if v.strip()],include_quizzes=quizzes.isChecked(),include_finished=finished.isChecked(),update_check=update_auto.isChecked(),usage_status=usage_status,email=mail.values()))
                 self.profiles.save_shared(self.store.data['settings'])
             except Exception as exc:
                 QMessageBox.warning(dialog,'设置未保存',str(exc));return
@@ -1488,6 +1543,19 @@ class Window(QMainWindow):
             self.status.setText('设置已保存。'+('　'+'　'.join(warnings) if warnings else ''))
         save.clicked.connect(apply);dialog.exec()
         self.notice_button = None
+
+    def usage_status_from(self, wanted):
+        """The ``usage_status`` to save for a tick or an unticked checkbox.
+
+        Ticking keeps the id already stored (a user who turns it back on must
+        not look like a new machine); unticking throws the whole log away.
+        """
+        current = dict(self.store.data['settings'].get('usage_status') or {})
+        if not wanted:
+            return usage_ping.forget()
+        if not usage_ping.valid_id(current.get('install')):
+            current['install'] = usage_ping.new_id()
+        return current
 
     def mailer_idle(self):
         return not self.controller.mailer.inflight

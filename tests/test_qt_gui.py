@@ -34,6 +34,7 @@ from datetime import datetime
 from storage import Store
 import secrets_store
 import profiles as profiles_module
+import usage_ping
 
 
 class QtGuiTests(unittest.TestCase):
@@ -805,6 +806,82 @@ class NoticeCardTests(unittest.TestCase):
         with patch('qt_desktop.threading.Thread') as thread:
             self.assertFalse(self.window.start_notice_check())
         self.assertFalse(thread.called)
+
+
+class UsagePingTests(unittest.TestCase):
+    """The counter is opt-in; nothing may leave the machine before the tick."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.profiles = profiles_module.Profiles(self.temp.name)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+        # A real build ships the credential beside the program; the test build
+        # has none, so the feature would be off and nothing could be observed.
+        self.saved_token = usage_ping.UPLOAD_TOKEN
+        usage_ping.UPLOAD_TOKEN = 'token'
+
+    def tearDown(self):
+        usage_ping.UPLOAD_TOKEN = getattr(self, 'saved_token', '')
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.temp.cleanup()
+
+    def test_a_window_without_opt_in_sends_nothing(self):
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertFalse(self.window.start_usage_ping())
+        self.assertFalse(thread.called)
+
+    def test_ticking_the_box_creates_an_id_and_unticking_removes_it(self):
+        self.assertEqual({}, self.window.usage_status_from(False))
+        given = self.window.usage_status_from(True)
+        self.assertTrue(usage_ping.valid_id(given['install']))
+        self.assertEqual({}, self.window.usage_status_from(False))
+
+    def test_ticking_again_keeps_the_same_identity(self):
+        first = self.window.usage_status_from(True)
+        self.window.controller.settings(dict(usage_status=first))
+        again = self.window.usage_status_from(True)
+        self.assertEqual(first['install'], again['install'])
+
+    def test_an_opted_in_window_starts_one_request(self):
+        self.window.controller.settings(dict(usage_status=dict(install=usage_ping.new_id())))
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertTrue(self.window.start_usage_ping())
+        self.assertTrue(thread.called)
+
+    def test_the_day_of_the_attempt_is_remembered_so_it_is_not_repeated(self):
+        install = usage_ping.new_id()
+        self.window.controller.settings(dict(usage_status=dict(install=install)))
+        with patch('qt_desktop.usage_ping.report',
+                   return_value=dict(install=install, reported='2026-10-21', message='已记录')):
+            # The worker thread and the queued timer both run here: drain events
+            # until the answer has landed rather than waiting a fixed time.
+            self.assertTrue(self.window.start_usage_ping())
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                self.app.processEvents()
+                if 'reported' in (self.window.store.data['settings'].get('usage_status') or {}):
+                    break
+                time.sleep(0.01)
+        saved = self.window.store.data['settings']['usage_status']
+        self.assertEqual('2026-10-21', saved.get('reported'))
+        self.assertFalse(usage_ping.due(saved))
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertFalse(self.window.start_usage_ping())
+        self.assertFalse(thread.called)
+
+    def test_a_failed_attempt_is_still_recorded_and_shown_nowhere(self):
+        install = usage_ping.new_id()
+        self.window.controller.settings(dict(usage_status=dict(install=install)))
+        self.window.finish_usage_ping(dict(install=install, failed='2026-10-21', message='网络不通'))
+        saved = self.window.store.data['settings']['usage_status']
+        self.assertEqual('2026-10-21', saved['failed'])
+        self.assertNotIn('网络不通', self.window.status.text())
 
 
 class SingleInstanceTests(unittest.TestCase):

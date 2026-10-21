@@ -70,6 +70,17 @@ def package(with_runtime=False):
         if not str(configured.get('sender', '') or '').strip() or not str(configured.get('password', '') or '').strip():
             raise RuntimeError('email_sender.json 里的发件邮箱或授权码为空，用户将无法发信。')
         entries['email_sender.json'] = 'email_sender.json'
+        # Same rule for the usage count: the credential cannot live in a public
+        # repository, so it travels beside the program.  Without it the feature
+        # is simply off, which is not a reason to refuse to build.
+        report_file = ROOT/'usage_report.json'
+        if report_file.is_file():
+            try:
+                report = json.loads(report_file.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                report = {}
+            if str(report.get('github_token', '') or '').strip():
+                entries['usage_report.json'] = 'usage_report.json'
         for name in names:
             if name.startswith(('.build/', '.runtime-bundle/')):
                 raise RuntimeError('Build output must not be a tracked release entry: ' + name)

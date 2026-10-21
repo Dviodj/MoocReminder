@@ -25,7 +25,7 @@ APP_FILE = 'app.json'
 ACCOUNTS_DIR = 'accounts'
 # Settings that describe how the program behaves, not who it is.
 GLOBAL_KEYS = ('interval_minutes', 'reminder_hours', 'include_quizzes', 'include_finished',
-               'autostart_prompted', 'update_check')
+               'autostart_prompted', 'update_check', 'usage_status')
 
 FORMAT = 2
 
