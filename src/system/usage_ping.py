@@ -62,7 +62,7 @@ def load_credentials(folder=None):
     """
     global UPLOAD_TOKEN, ISSUE_URL
     if folder is None:
-        folder = PROGRAM_ROOT
+        folder = paths.PROGRAM_ROOT
     found = Path(folder)/REPORT_FILE
     if found in _loaded:
         return bool(UPLOAD_TOKEN)
