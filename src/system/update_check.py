@@ -329,6 +329,129 @@ def release_notes(page):
     return ''
 
 
+def all_page(tag, page):
+    """Release notes plus every announcement a rendered release page lists."""
+    text = page.decode('utf-8', 'replace') if isinstance(page, (bytes, bytearray)) else (page or '')
+    notes = release_notes(text)
+    # The card shows one line, so it gets the first short paragraph; the archive
+    # has room for what the card cannot show, and there is a lot of it (the
+    # notes end in a full change log).
+    return dict(notes=notes, detail=notes_block(text),
+                announcements=announcements_in_page(text))
+
+
+def notes_block(page):
+    """The release notes as plain text, or ``''``.
+
+    Rendered to text rather than kept as HTML: the archive shows it in a plain
+    label, and feeding a page's markup to a rich-text widget would also feed it
+    whatever else the page contained.
+    """
+    if isinstance(page, (bytes, bytearray)):
+        page = page.decode('utf-8', 'replace')
+    if not isinstance(page, str):
+        return ''
+    start = page.find('markdown-body')
+    if start < 0:
+        return ''
+    segment = page[start:start + 40000]
+    # The body starts inside the opening tag, and the end is the first closing
+    # element after the tag's opening ``>``.
+    opening = segment.find('>')
+    if opening > 0:
+        segment = segment[opening + 1:]
+    end = segment.find('</div>')
+    if end > 0:
+        segment = segment[:end]
+    # The announcement block is data, not prose; it is shown as announcements.
+    segment = re.sub(r'<div class="snippet-clipboard-content.*?</div>', '', segment, flags=re.S)
+    segment = re.sub(r'<pre.*?</pre>', '', segment, flags=re.S)
+    segment = re.sub(r'<(h[1-6])[^>]*>', '\n\n', segment)
+    segment = re.sub(r'</(p|h[1-6]|li|ul)>', '\n', segment)
+    segment = re.sub(r'<li[^>]*>', '· ', segment)
+    segment = re.sub(r'<[^>]+>', '', segment)
+    text = html.unescape(segment).replace('\r\n', '\n')
+    text = '\n'.join(line.strip() for line in text.split('\n'))
+    return re.sub(r'\n{3,}', '\n\n', text).strip()[:MAX_TEXT]
+
+
+def archive_url(page=100):
+    """Where the program sends someone who wants the full list of releases."""
+    return RELEASES_PAGE + ('?page=%d' % page if page else '')
+
+
+def older_pages(page):
+    """Links to the older releases listed at the bottom of a release page."""
+    if isinstance(page, (bytes, bytearray)):
+        page = page.decode('utf-8', 'replace')
+    if not isinstance(page, str):
+        return []
+    found = []
+    for href in re.findall(r'href="([^"]+)"', page):
+        href = html.unescape(href)
+        if '/releases' in href and 'page=' in href and 'expanded_assets' not in href:
+            href = href.split('#')[0]
+            if href.startswith('/'):
+                href = 'https://github.com' + href
+            if href.startswith('https://') and href not in found:
+                found.append(href)
+    return found
+
+
+def older_releases(page, timeout=TIMEOUT_SECONDS, opener=None):
+    """``[{tag, url}]`` for the releases after the first on this page.
+
+    GitHub groups releases by day on the releases page, so one page can hold
+    several; what makes them releases is the link to their tag page.
+    """
+    if isinstance(page, (bytes, bytearray)):
+        page = page.decode('utf-8', 'replace')
+    if not isinstance(page, str):
+        return []
+    found, seen = [], set()
+    for match in re.finditer(r'href="([^"]*/releases/tag/([^"/?#]+))"', page):
+        href, tag = match.group(1), match.group(2)
+        if tag in seen or tag == 'latest' or not version_tuple(tag):
+            continue
+        seen.add(tag)
+        if href.startswith('/'):
+            href = 'https://github.com' + href
+        if href.startswith('https://'):
+            found.append(dict(tag=tag, url=href))
+    return found[:MAX_ANNOUNCEMENTS]
+
+
+def all(timeout=TIMEOUT_SECONDS, opener=None, pages=3):
+    """Every release still worth reading, newest first.  Never raises.
+
+    ``check`` answers "what is the latest"; this answers "what has been
+    announced", which for the announcement archive means walking back a few
+    releases.  It reuses the page the version check already had to fetch, so the
+    usual cost is the same two requests plus one per older release.
+    """
+    tag = latest_tag(timeout, opener)
+    if not tag:
+        return []
+    url = RELEASES_PAGE + '/tag/' + tag
+    body = fetch((url,), timeout, opener) or b''
+    found = [dict(tag=tag, url=url, page=body)]
+    queue = older_pages(body) if pages > 1 else []
+    while queue and len(found) < max(1, pages):
+        body = fetch((queue.pop(0),), timeout, opener)
+        if not body:
+            continue
+        queue.extend(older_pages(body))
+        for entry in older_releases(body):
+            if all(entry['tag'] != item['tag'] for item in found):
+                found.append(dict(tag=entry['tag'], url=entry['url'], page=None))
+        if len(found) > pages * MAX_ANNOUNCEMENTS:
+            break
+    for item in found[:max(1, pages)]:
+        if item['page'] is None:
+            item['page'] = fetch((item['url'],), timeout, opener) or b''
+    return found[:max(1, pages)]
+
+
 def check(urls=(), timeout=TIMEOUT_SECONDS, opener=None):
     """The parsed document, or ``None``.  Never raises.
 
@@ -363,6 +486,19 @@ def from_page(tag, page):
                       notes=release_notes(text), announcements=announcements_in_page(text)))
 
 
+def release_page(tag, timeout=TIMEOUT_SECONDS, opener=None):
+    """The rendered page of one release, or ``None``.
+
+    The one-click update needs the download links, which live on the page and
+    nowhere else; asking for the page directly also means the update does not have
+    to wait for, or depend on, the version check that produced the tag.
+    """
+    tag = str(tag or '').strip().strip('/')
+    if not tag or not version_tuple(tag) or '/' in tag:
+        return None
+    return fetch((RELEASES_PAGE + '/tag/' + tag,), timeout, opener)
+
+
 def unseen(announcements, seen=''):
     """Announcements the user has not dismissed yet, the pinned one first.
 
@@ -381,3 +517,29 @@ def unseen(announcements, seen=''):
     left = [item for item in announcements if item['id'] not in dismissed]
     pinned = [item for item in left if item.get('pinned')]
     return pinned + [item for item in left if not item.get('pinned')]
+
+
+def history(releases):
+    """Newest first: one entry per version, its notes and its announcements.
+
+    Everything published is kept, including what the user already dismissed: the
+    archive exists so that "关掉了" does not mean "找不回来了".  The pinned
+    ordering of ``unseen`` is for the card, which must show one thing; a list
+    read on purpose is in date order like any archive.
+    """
+    found = []
+    for release in releases or ():
+        if not isinstance(release, dict):
+            continue
+        tag = release.get('tag')
+        if not isinstance(tag, str) or not version_tuple(tag):
+            continue
+        announcements = [item for item in release.get('announcements') or ()
+                         if isinstance(item, dict) and isinstance(item.get('id'), str)]
+        found.append(dict(tag=tag, url=release.get('url') if isinstance(release.get('url'), str) else '',
+                          notes=release.get('notes') if isinstance(release.get('notes'), str) else '',
+                          detail=release.get('detail') if isinstance(release.get('detail'), str) else '',
+                          latest=release.get('latest') is True,
+                          announcements=announcements))
+    found.sort(key=lambda item: version_tuple(item['tag']) or (0, 0, 0), reverse=True)
+    return found

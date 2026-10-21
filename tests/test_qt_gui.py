@@ -35,6 +35,7 @@ from storage import Store
 import secrets_store
 import profiles as profiles_module
 import usage_ping
+import self_update
 
 
 class QtGuiTests(unittest.TestCase):
@@ -660,6 +661,10 @@ class NoticeCardTests(unittest.TestCase):
         self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
         self.window.notice_data = None
         self.window.refresh()
+        # These tests are about what the card says, not about how this checkout
+        # was installed; claiming an installable copy keeps the ones that press
+        # the update button independent of where the suite runs from.
+        self.window._installable = True
 
     def tearDown(self):
         self.window.controller.stop()
@@ -680,7 +685,10 @@ class NoticeCardTests(unittest.TestCase):
         self.assertTrue(self.deliver(latest='v0.9.9'))
         self.assertTrue(self.window.notice.isVisibleTo(self.window))
         self.assertIn('v0.9.9', self.window.notice_title.text())
-        self.assertEqual('下载新版本', self.window.notice_action.text())
+        # One press installs it; the page stays beside that as the manual route.
+        self.assertEqual('打开发布页', self.window.notice_action.text())
+        self.assertTrue(self.window.notice_press.isVisibleTo(self.window))
+        self.assertIn('v0.9.9', self.window.notice_press.text())
         # A version card is about the program, so there is nothing to dismiss.
         self.assertFalse(self.window.notice_dismiss.isVisibleTo(self.window))
 
@@ -808,7 +816,241 @@ class NoticeCardTests(unittest.TestCase):
         self.assertFalse(thread.called)
 
 
-class UsagePingTests(unittest.TestCase):
+class NoticeDialogTests(unittest.TestCase):
+    """The announcement window: opened at every launch, and from the sidebar."""
+
+    HISTORY = [dict(tag='v0.2.2', url='https://example.com/tag', notes='本版改动',
+                    detail='完整改动\n· 新增更新检查与公告', latest=True,
+                    announcements=[dict(id='a1', title='欢迎使用', body='正文', link='', level='info'),
+                                   dict(id='a2', title='重要通知', body='停服', link='', level='warning')]),
+               dict(tag='v0.2.1', url='https://example.com/old', notes='更早的版本',
+                    detail='', latest=False, announcements=[])]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.profiles = profiles_module.Profiles(self.temp.name)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+
+    def tearDown(self):
+        dialog = self.window.notice_dialog
+        if dialog is not None:
+            dialog.close()
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.temp.cleanup()
+
+    def deliver(self, history=None):
+        history = self.HISTORY if history is None else history
+        self.window.notice_history = list(history)
+        self.window.notice_version = history[0]['tag'] if history else ''
+        self.window.refresh()
+
+    def test_the_window_opens_itself_once_a_check_comes_back(self):
+        # A card on a page is read once and forgotten; the point of the window
+        # is that nobody has to go looking for it.
+        self.assertIsNone(self.window.notice_dialog)
+        self.window.finish_notice_check((dict(latest='v0.2.2', url='', notes='', announcements=[]), []))
+        self.assertIsNotNone(self.window.notice_dialog)
+        self.assertTrue(self.window.notice_dialog.isVisible())
+        self.window.notice_dialog.close()
+
+    def test_a_failed_check_does_not_open_an_empty_window(self):
+        self.window.finish_notice_check(None)
+        self.assertIsNone(self.window.notice_dialog)
+
+    def test_closing_the_window_marks_nothing_as_read(self):
+        self.deliver()
+        dialog = self.window.open_notice_dialog()
+        self.assertIn('欢迎使用', dialog.view.toPlainText())
+        dialog.close()
+        # Everything stays available: the card keeps showing it and the window
+        # reopens with the same content.
+        self.assertEqual([], self.window.store.data['settings']['announcement_seen'])
+        self.assertIn('欢迎使用', self.window.open_notice_dialog().view.toPlainText())
+
+    def test_the_window_lists_every_version_newest_first(self):
+        self.deliver()
+        text = self.window.open_notice_dialog().view.toPlainText()
+        self.assertLess(text.index('v0.2.2'), text.index('v0.2.1'))
+        self.assertIn('完整改动', text)
+        self.assertIn('新增更新检查与公告', text)
+        self.assertNotIn('<', text)
+
+    def test_a_warning_announcement_is_coloured_in_the_window(self):
+        self.deliver()
+        html = self.window.notice_document()
+        self.assertIn('#b26a00', html)
+
+    def test_the_window_shows_the_new_version_when_there_is_one(self):
+        self.window.notice_version = 'v9.9.9'
+        self.deliver()
+        self.assertIn('新版本', self.window.open_notice_dialog().summary.text())
+
+    def test_a_dismissed_announcement_is_still_listed_but_marked(self):
+        self.window.controller.settings(dict(announcement_seen=['a1']))
+        self.deliver()
+        dialog = self.window.open_notice_dialog()
+        self.assertIn('欢迎使用', dialog.view.toPlainText())
+        self.assertIn('已读', dialog.view.toPlainText())
+        # The card, which is the place that owns "seen", no longer offers it.
+        self.assertFalse(self.window.visible_announcements() and
+                         self.window.visible_announcements()[0]['id'] == 'a1')
+
+    def test_the_window_is_as_tall_as_its_text_and_no_taller(self):
+        # A text browser reports a small fixed hint; without measuring the
+        # document the window opened full of empty white.
+        self.deliver()
+        dialog = self.window.open_notice_dialog()
+        QApplication.processEvents()
+        needed = dialog.view.document().size().height()
+        self.assertGreater(dialog.view.height(), 0)
+        self.assertLessEqual(dialog.view.height(), needed + 60)
+
+    def test_a_long_history_is_capped_and_scrolls(self):
+        long_history = [dict(tag=f'v0.1.{index}', url='', notes='说明', detail='', latest=False,
+                             announcements=[]) for index in range(40)] + self.HISTORY
+        self.deliver(long_history)
+        dialog = self.window.open_notice_dialog()
+        QApplication.processEvents()
+        screen = dialog.screen() or QApplication.primaryScreen()
+        self.assertLessEqual(dialog.height(), screen.availableGeometry().height())
+
+    def test_the_archive_page_lists_the_same_text(self):
+        self.deliver()
+        self.window.show_page('notices')
+        QApplication.processEvents()
+        self.assertIn('欢迎使用', self.window.notices_view.toPlainText())
+        self.assertIn('v0.2.1', self.window.notices_view.toPlainText())
+
+    def test_a_check_from_the_window_updates_it(self):
+        self.deliver()
+        dialog = self.window.open_notice_dialog()
+        with patch('qt_desktop.threading.Thread'):
+            dialog.check_button.click()
+        self.assertFalse(dialog.check_button.isEnabled())
+        dialog.close()
+
+
+class UpdateUiTests(unittest.TestCase):
+    """The one press: what the buttons say, and what happens when it fails.
+
+    The download and the switch are both replaced here. What is under test is
+    the wiring -- which button is offered, what the note promises, and whether a
+    failure leaves the program usable -- not the transport, which is exercised
+    in test_self_update.py.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.profiles = profiles_module.Profiles(self.temp.name)
+        self.window = Window(self.profiles.load_store(), profiles=self.profiles, tray=False)
+        self.window.notice_data = None
+        self.window._installable = True
+        self.window.refresh()
+
+    def tearDown(self):
+        dialog = self.window.notice_dialog
+        if dialog is not None:
+            dialog.close()
+        self.window.controller.stop()
+        self.window.controller.worker.join(timeout=2)
+        self.window.close()
+        self.temp.cleanup()
+
+    def deliver(self, latest='v0.9.9', url='https://example.com/download'):
+        result = dict(latest=latest, url=url, notes='本版改动', announcements=[])
+        self.window.notice_history = []
+        self.window.finish_notice_check((result, []))
+        if self.window.notice_dialog is not None:
+            self.window.notice_dialog.close()
+        return result
+
+    def test_a_new_version_offers_the_one_press(self):
+        self.deliver()
+        self.assertTrue(self.window.notice_press.isVisibleTo(self.window))
+        self.assertIn('v0.9.9', self.window.notice_press.text())
+        self.assertIn('data', self.window.notice_body.text())
+
+    def test_without_a_runtime_only_the_page_is_offered(self):
+        # A source checkout with nothing but a .venv cannot be switched in
+        # place; the card must not pretend otherwise.
+        self.window._installable = False
+        self.deliver()
+        self.assertFalse(self.window.notice_press.isVisibleTo(self.window))
+        self.assertEqual('下载新版本', self.window.notice_action.text())
+        self.assertIn('手动', self.window.update_note())
+
+    def test_the_card_button_starts_the_update(self):
+        self.deliver()
+        with patch.object(self.window, 'start_update') as start:
+            self.window.notice_press.click()
+        start.assert_called_once_with()
+        self.assertIn('立即更新', self.window.notice_press.text())
+
+    def test_the_window_and_the_archive_offer_the_same_press(self):
+        self.deliver()
+        dialog = self.window.open_notice_dialog()
+        self.assertTrue(dialog.update_button.isVisibleTo(dialog))
+        self.assertIn('v0.9.9', dialog.update_button.text())
+        dialog.close()
+        # The archive page has no other way to reach the update on a wide screen.
+        # The page is only on screen once someone opens it, so it is looked up
+        # from the window with that page shown.
+        self.window.show_page('notices')
+        self.assertIn('v0.9.9', self.window.notices_update.text())
+        self.assertTrue(self.window.notices_update.isVisibleTo(self.window))
+
+    def test_a_failed_download_leaves_the_old_version_alone(self):
+        self.deliver()
+        self.window.update_pending = 'v0.9.9'
+        self.window.finish_update(self_update.UpdateError('下载不完整，请稍后重试。'))
+        self.assertIsNone(self.window.update_pending)
+        self.assertIn('下载不完整', self.window.status.text())
+        # The card goes back to offering the press rather than spinning.
+        self.assertIn('立即更新', self.window.notice_press.text())
+        self.assertTrue(self.window.notice_press.isEnabled())
+
+    def test_an_update_with_no_version_to_install_does_nothing(self):
+        self.window.notice_data = dict(latest='', url='', notes='', announcements=[])
+        self.window.refresh()
+        with patch('qt_desktop.threading.Thread') as thread:
+            self.assertFalse(self.window.start_update())
+        self.assertFalse(thread.called)
+        self.assertIn('没有可更新的版本', self.window.status.text())
+
+    def test_a_prepared_package_hands_over_to_the_switch_script(self):
+        self.deliver()
+        # Written to the program's own .update folder, never to a temp one, so
+        # the workspace is pointed at a scratch install for this test.
+        install = scratch_folder('update-ui-install')
+        self.window.workspace = install
+        plan = self_update.work_folder(install) / 'plan.json'
+        made = dict(workspace=str(install), staged=self.temp.name, swap=[], copy=[],
+                    ready=self.temp.name)
+        try:
+            with patch('qt_desktop.subprocess.Popen') as popen:
+                self.window.finish_update(made)
+            self.assertTrue(popen.called)
+            command = popen.call_args.args[0]
+            # A separate interpreter runs the switch: this process holds the
+            # folders open, so it can only quit and let someone else move them.
+            self.assertIn('-c', command)
+            self.assertTrue(plan.is_file())
+            # The window quits so the switch is not fighting a running program.
+            self.assertTrue(self.window.quitting)
+        finally:
+            self_update.clean(install)
+
+
     """The counter is opt-in; nothing may leave the machine before the tick."""
 
     @classmethod

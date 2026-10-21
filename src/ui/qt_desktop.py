@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -20,12 +21,12 @@ from qt_bootstrap import prepare_qt
 _data = paths.data_dir()
 prepare_qt(_data)
 
-from PySide6.QtCore import Qt, QTimer, Signal, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QTextOption
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QDialog, QFormLayout,
-    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QTextBrowser, QStackedWidget, QMenu,
+    QSpinBox, QComboBox, QPlainTextEdit, QMessageBox, QFrame, QScrollArea, QTextBrowser, QStackedWidget, QMenu,
     QSystemTrayIcon, QRadioButton, QButtonGroup)
 from portal import Controller
 import autostart
@@ -34,6 +35,7 @@ import emailer
 import mail_guide
 import mail_log
 import profiles as profiles_module
+import self_update
 import update_check
 import usage_ping
 from core import (DEFAULT_DIGEST_INTERVAL, MAX_DIGEST_INTERVAL, MIN_DIGEST_INTERVAL, WEEKDAY_NAMES,
@@ -68,11 +70,12 @@ PAGES = {
     'assignments': dict(text='☷   作业清单', title='作业清单', subtitle='搜索、筛选、勾选完成，都在这一页。', group='学习空间'),
     'courses': dict(text='▤   我的课程', title='我的课程', subtitle='每次检查作业后读到的课程会列在这里。', group='学习空间'),
     'log': dict(text='✉   发信记录', title='邮件发送记录', subtitle='每一封提醒是否发出、为什么失败，都在这里。', group='偏好设置'),
+    'notices': dict(text='✦   公告', title='公告与版本', subtitle='用过的公告和版本都留在这一页，关掉也能再看。', group='偏好设置'),
     'details': dict(text='ⓘ   连接详情', title='连接详情', subtitle='当前状态、错误记录与本机数据位置。', group='偏好设置'),
 }
 # 'settings' is not a page: 提醒设置 is a dialog, so it stays an action button.
 NAV_GROUPS = (('学习空间', ('overview', 'assignments', 'courses')),
-              ('偏好设置', ('log', 'settings', 'details')))
+              ('偏好设置', ('log', 'notices', 'settings', 'details')))
 
 
 def _whole_number(value, fallback):
@@ -596,6 +599,140 @@ class Tray(QSystemTrayIcon):
         self.setToolTip(f'{APP_NAME} · {pending} 项待完成' if pending else f'{APP_NAME} · 暂无待完成作业')
 
 
+class NoticeDialog(QDialog):
+    """The announcement window: what is new, and everything announced before.
+
+    It exists because a card inside the overview page is read once and then gone
+    from sight.  This window is opened by the program at every launch and from
+    the sidebar at any time, and closing it decides nothing: nothing here is
+    marked as read, so an announcement cannot be lost by pressing the wrong
+    button.
+    """
+
+    def __init__(self, window, parent=None):
+        super().__init__(parent or window)
+        self.window = window
+        self.setWindowTitle(f'公告 · {APP_NAME}')
+        self.setWindowIcon(QIcon(str(paths.icon_path())))
+        self.setStyleSheet(STYLE)
+        self.resize(660, 560)
+        self.setMinimumSize(560, 360)
+        layout = QVBoxLayout(self); layout.setContentsMargins(22, 20, 22, 18); layout.setSpacing(10)
+        self.heading = QLabel('公告'); self.heading.setObjectName('title'); layout.addWidget(self.heading)
+        self.summary = QLabel(''); self.summary.setObjectName('muted'); self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+        layout.addSpacing(4)
+        frame = QFrame(); frame.setObjectName('card'); frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        self.view = QTextBrowser()
+        self.view.setObjectName('noticeDoc')
+        self.view.setOpenExternalLinks(False)
+        self.view.setFrameShape(QFrame.Shape.NoFrame)
+        self.view.setStyleSheet('QTextBrowser#noticeDoc{background:#fff;border:none;border-radius:12px;padding:16px 18px}'
+                                'QTextBrowser#noticeDoc QScrollBar:vertical{background:#fff;width:7px}'
+                                'QTextBrowser#noticeDoc QScrollBar::handle:vertical{background:#e4e9f2;border-radius:3px;'
+                                'min-height:30px}QTextBrowser#noticeDoc QScrollBar::add-line:vertical,'
+                                'QTextBrowser#noticeDoc QScrollBar::sub-line:vertical{height:0}')
+        frame_layout.addWidget(self.view); layout.addWidget(frame, 1)
+        # A text browser never asks to be tall; it asks for a small fixed box.
+        # The frame is sized to the finished text below so that a short notice
+        # gets a short window instead of a card of empty white.
+        self.doc_frame = frame
+        self.footer = QLabel('')
+        self.footer.setObjectName('muted'); self.footer.setWordWrap(True); layout.addWidget(self.footer)
+        self.update_note = QLabel('')
+        self.update_note.setObjectName('muted'); self.update_note.setWordWrap(True)
+        self.update_note.setVisible(False); layout.addWidget(self.update_note)
+        self.buttons = QHBoxLayout()
+        self.check_button = QPushButton('检查更新')
+        self.check_button.clicked.connect(self.check_now)
+        self.buttons.addWidget(self.check_button)
+        # Two ways to get the new version, side by side: one press, or the page.
+        self.update_button = QPushButton('立即更新')
+        self.update_button.setObjectName('primary')
+        self.update_button.clicked.connect(self.install_now)
+        self.update_button.setVisible(False)
+        self.buttons.addWidget(self.update_button)
+        self.archive_button = QPushButton('打开发布页')
+        self.archive_button.clicked.connect(window.open_release_page)
+        self.buttons.addWidget(self.archive_button)
+        self.buttons.addStretch()
+        self.close_button = QPushButton('关闭'); self.close_button.setObjectName('primary')
+        self.close_button.clicked.connect(self.reject)
+        self.buttons.addWidget(self.close_button)
+        layout.addLayout(self.buttons)
+        self.view.document().setDocumentMargin(2)
+        self.refill()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refill()
+
+    def refill(self):
+        """Draw from the window's state; called again whenever that changes."""
+        document = self.window.notice_document()
+        self.refill_view(document)
+        self.summary.setText(self.window.notice_summary())
+        self.footer.setText(self.window.notice_footer())
+        self.check_button.setEnabled(not self.window.notice_busy)
+        self.check_button.setText('检查中…' if self.window.notice_busy else '检查更新')
+        # The update button appears only when there is something to install; the
+        # note under the list then says what pressing it does.
+        tag = self.window.update_available()
+        self.update_button.setVisible(bool(tag) or self.window.update_pending is not None)
+        self.update_button.setEnabled(self.window.update_pending is None and self.window.can_install())
+        self.update_button.setText(self.window.update_ready_text())
+        note = self.window.update_note(tag) if (tag or self.window.update_pending) else ''
+        self.update_note.setText(note)
+        self.update_note.setVisible(bool(note))
+        if note:
+            self.window.fit_wrapped(self.update_note)
+        # The card owns the "seen" bookkeeping, and there this button is safe: it
+        # is the window that says what has been read.  Here it would be a way to
+        # lose an announcement, which is the one thing the archive must not do.
+        self.window.refresh_notice()
+
+    def install_now(self):
+        self.window.start_update()
+
+    def update_changed(self):
+        """Called by the window when the update state moves on."""
+        if self.isVisible():
+            self.refill()
+
+    def refill_view(self, document):
+        self.view.setHtml(document)
+        self.view.verticalScrollBar().setValue(0)
+        self.fit_body()
+
+    def fit_body(self):
+        """Grow or shrink the window so the card fits the text it holds.
+
+        A text browser never asks to be tall -- its size hint is a small fixed
+        box -- so the height has to be read from the finished document and
+        applied by hand, to the browser, to its card, and then to the window.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        room = (screen.availableGeometry().height() - 240) if screen is not None else 720
+        wanted = int(self.view.document().size().height()) + 34
+        height = max(120, min(wanted, room))
+        self.view.setMinimumHeight(height); self.view.setMaximumHeight(height)
+        self.doc_frame.setMinimumHeight(height); self.doc_frame.setMaximumHeight(height)
+        # A layout cannot make a window that was explicitly given a size grow, so
+        # the window is resized here, from what the layout says it needs.
+        self.layout().activate()
+        room = (screen.availableGeometry().height() - 120) if screen is not None else 760
+        self.resize(self.width(), int(min(max(self.sizeHint().height(), 360), room)))
+
+    def check_now(self):
+        self.window.start_notice_check(manual=True, then=self.notice_checked)
+
+    def notice_checked(self, *_):
+        """Called by the window once a check by hand has come back."""
+        if self.isVisible():
+            self.refill()
+
+
 class Window(QMainWindow):
     # A worker thread cannot redraw the window, and QTimer.singleShot started
     # from one is never delivered at all (Qt needs a timer that belongs to a
@@ -603,6 +740,7 @@ class Window(QMainWindow):
     # back through one of these signals, which Qt queues across threads.
     notice_ready = Signal(object, bool)
     usage_ready = Signal(object)
+    update_ready = Signal(object)
 
     def __init__(self, store, profiles=None, tray=True):
         super().__init__()
@@ -612,6 +750,7 @@ class Window(QMainWindow):
         self._email_dialog = None
         self.notice_ready.connect(self.finish_notice_check)
         self.usage_ready.connect(self.finish_usage_ping)
+        self.update_ready.connect(self.finish_update)
         self.tray = None
         self.quitting = False
         # Read once and cached: answering this means a PowerShell round trip, and
@@ -633,6 +772,20 @@ class Window(QMainWindow):
         self.notice_busy = False
         self.notice_seen = ''
         self.notice_signature = None
+        # The archive: every release read so far, and whether this launch has
+        # already used its one automatic check.  The window opens by itself once
+        # per launch, which is why it is remembered here and not in the file.
+        self.notice_dialog = None
+        self.notice_history = []
+        self.notice_asked = False
+        self.notice_after = None
+        # The one-click update: what the background is doing, and the last answer
+        # it gave. Phases are (what is happening, permille done or None).
+        self.update_phase = ''
+        self.update_fraction = None
+        self.update_error = ''
+        self.update_pending = None
+        self._installable = None
         self._build()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -705,6 +858,10 @@ class Window(QMainWindow):
         self.account_combo.activated.connect(self.account_selected); sidebar.addWidget(self.account_combo)
         sidebar.addSpacing(8)
         self.connection = QLabel('●  尚未连接慕课'); self.connection.setObjectName('muted'); sidebar.addWidget(self.connection)
+        sidebar.addSpacing(6)
+        self.notice_open = QPushButton('✦  查看公告')
+        self.notice_open.setToolTip('打开公告窗口；每次启动时程序也会自己弹出一次')
+        self.notice_open.clicked.connect(self.open_notice_dialog); sidebar.addWidget(self.notice_open)
         layout.addWidget(side)
         main = QWidget(); body = QVBoxLayout(main); body.setContentsMargins(32, 23, 32, 19); body.setSpacing(18)
         top = QHBoxLayout(); self.crumb = QLabel('学习空间  /  总览'); self.crumb.setObjectName('muted'); top.addWidget(self.crumb); top.addStretch()
@@ -742,16 +899,27 @@ class Window(QMainWindow):
         # Filled in by refresh() from whatever the last check returned; hidden
         # until there is something real to say.
         self.notice = QFrame(); self.notice.setObjectName('card')
-        notice_row = QHBoxLayout(self.notice); notice_row.setContentsMargins(20, 16, 20, 16)
-        notice_copy = QVBoxLayout()
+        notice_row = QHBoxLayout(self.notice); notice_row.setContentsMargins(20, 16, 20, 16); notice_row.setSpacing(14)
+        # A slim bar ties the card to the announcement window's violet badge, so
+        # the card reads as "one of the announcements" rather than as another
+        # grey hint box squeezed in among the other cards.
+        self.notice_mark = QFrame(); self.notice_mark.setFixedWidth(3)
+        self.mark_notice('#7a6bd1')
+        notice_row.addWidget(self.notice_mark)
+        notice_copy = QVBoxLayout(); notice_copy.setSpacing(6)
         self.notice_title = QLabel(); self.notice_title.setObjectName('sectionTitle'); self.notice_title.setWordWrap(True)
-        self.notice_body = QLabel(); self.notice_body.setObjectName('muted'); self.notice_body.setWordWrap(True)
+        self.notice_body = QLabel(); self.notice_body.setWordWrap(True)
+        self.notice_body.setStyleSheet('color:#5d6d84;font-size:13px')
         notice_copy.addWidget(self.notice_title); notice_copy.addWidget(self.notice_body)
         notice_row.addLayout(notice_copy, 1); notice_row.addStretch()
         self.notice_action = QPushButton(); self.notice_action.setObjectName('primary')
         self.notice_action.clicked.connect(self.open_notice); notice_row.addWidget(self.notice_action)
         self.notice_dismiss = QPushButton('知道了'); self.notice_dismiss.clicked.connect(self.dismiss_notice)
         notice_row.addWidget(self.notice_dismiss)
+        self.notice_press = QPushButton(''); self.notice_press.setObjectName('primary')
+        self.notice_press.clicked.connect(self.start_update)
+        self.notice_press.setVisible(False)
+        notice_row.addWidget(self.notice_press)
         self.notice.setVisible(False)
         overview_page.addWidget(self.notice)
         # Asked exactly once, here rather than in the middle of startup: turning
@@ -827,6 +995,43 @@ class Window(QMainWindow):
         self.log_page = EmailLogPage()
         self.add_page('log', self.log_page)
 
+        # ---- 公告与版本：关掉的公告与每个版本的说明都留在这里 ----
+        notices = QWidget(); notice_page = QVBoxLayout(notices)
+        notice_page.setContentsMargins(0, 0, 0, 0); notice_page.setSpacing(12)
+        notice_card = QFrame(); notice_card.setObjectName('card'); notice_panel = QVBoxLayout(notice_card)
+        notice_panel.setContentsMargins(20, 18, 20, 14); notice_panel.setSpacing(12)
+        notice_head = QHBoxLayout()
+        notice_title = QLabel('公告与版本'); notice_title.setObjectName('sectionTitle'); notice_head.addWidget(notice_title)
+        notice_head.addStretch()
+        self.notices_check = QPushButton('检查更新')
+        self.notices_check.clicked.connect(lambda: self.start_notice_check(manual=True))
+        notice_head.addWidget(self.notices_check)
+        notice_panel.addLayout(notice_head)
+        self.notices_summary = QLabel(''); self.notices_summary.setObjectName('muted'); self.notices_summary.setWordWrap(True)
+        notice_panel.addWidget(self.notices_summary)
+        # The update offered here as well as in the window: someone who closed the
+        # window and came looking for the new version should not have to hunt.
+        notice_update = QHBoxLayout()
+        self.notices_update = QPushButton(''); self.notices_update.setObjectName('primary')
+        self.notices_update.clicked.connect(self.start_update)
+        self.notices_update.setVisible(False)
+        notice_update.addWidget(self.notices_update); notice_update.addStretch()
+        notice_panel.addLayout(notice_update)
+        self.notices_note = QLabel(''); self.notices_note.setObjectName('muted')
+        self.notices_note.setWordWrap(True); self.notices_note.setVisible(False)
+        notice_panel.addWidget(self.notices_note)
+        self.notices_view = QTextBrowser(); self.notices_view.setOpenExternalLinks(False)
+        self.notices_view.setStyleSheet('background:#fff;border:1px solid #eef1f6;border-radius:8px')
+        self.notices_view.setHtml(self.notice_document(self.notice_history))
+        notice_panel.addWidget(self.notices_view, 1)
+        notice_foot = QHBoxLayout()
+        self.notices_footer = QLabel(''); self.notices_footer.setObjectName('muted'); self.notices_footer.setWordWrap(True)
+        notice_foot.addWidget(self.notices_footer, 1)
+        archive = QPushButton('打开发布页'); archive.clicked.connect(self.open_release_page)
+        notice_foot.addWidget(archive); notice_panel.addLayout(notice_foot)
+        notice_page.addWidget(notice_card, 1)
+        self.add_page('notices', notices)
+
         # ---- 连接详情 ----
         details = QWidget(); detail_page = QVBoxLayout(details)
         detail_page.setContentsMargins(0, 0, 0, 0); detail_page.setSpacing(12)
@@ -860,6 +1065,9 @@ class Window(QMainWindow):
             button.setProperty('active', name == key)
             # Qt only re-reads a dynamic property when the widget is repolished.
             button.style().unpolish(button); button.style().polish(button)
+        if key == 'notices':
+            # Built because someone is looking at it, not on every tick.
+            self.refresh_notices_view()
         if refresh:
             self.refresh()
         return key
@@ -967,6 +1175,7 @@ class Window(QMainWindow):
         self.binding.setVisible(not all(bound.values()))
         self.autostart.setVisible(not data['settings'].get('autostart_prompted') and not self.autostart_on)
         self.refresh_notice()
+        self.refresh_notices_page()
         if not all(bound.values()):
             missing = [name for name, ok in (('慕课账号', bound['mooc']), ('接收提醒的邮箱', bound['email'])) if not ok]
             self.binding_detail.setText('尚未绑定：' + '、'.join(missing) + '。绑定后即可检查作业并收到提醒。')
@@ -1193,8 +1402,8 @@ class Window(QMainWindow):
         self.last_signature = None
         self.refresh()
 
-    def start_notice_check(self, manual=False):
-        """Ask for the announcement file in the background, once per window.
+    def start_notice_check(self, manual=False, then=None):
+        """Read the releases in the background, once per window.
 
         The request is fire-and-forget: whatever comes back is stored for
         refresh() to read, and a failure leaves ``notice_data`` alone so a
@@ -1207,38 +1416,384 @@ class Window(QMainWindow):
             return False
         if not manual and not self.store.data['settings'].get('update_check', True):
             return False
-        if hasattr(self, 'notice_button'):
-            self.notice_button.setEnabled(False)
+        for button in (getattr(self, 'notice_button', None), getattr(self, 'notices_check', None)):
+            if button is not None:
+                button.setEnabled(False)
         self.notice_busy = True
+        # Two different questions are asked of one answer: the card wants the
+        # latest release, the archive wants all of them, and both ride on the
+        # same page the version check has to fetch anyway.
+        self.notice_after = then
 
         def worker():
             result = update_check.check()
+            releases = []
+            if result:
+                try:
+                    releases = update_check.all()
+                except Exception:
+                    # The archive is a bonus: losing it must not lose the check.
+                    releases = []
             # Emitted, not painted: the signal crosses threads and Qt delivers
             # it back on the GUI thread, which is the only thread allowed here.
-            self.notice_ready.emit(result, manual)
+            # A window that was closed while the answer was in flight has no
+            # handler left, and emitting into a deleted object raises inside
+            # this thread, which would print a traceback nobody can act on.
+            try:
+                self.notice_ready.emit((result, releases), manual)
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
         return True
 
-    def finish_notice_check(self, result, manual=False):
+    def finish_notice_check(self, answer, manual=False):
+        result, releases = answer if isinstance(answer, tuple) else (answer, [])
         self.notice_busy = False
-        if hasattr(self, 'notice_button'):
-            self.notice_button.setEnabled(True)
-        if result is None:
-            if manual:
-                self.status.setText('暂时连不上更新地址，可能没有网络；稍后再试即可。')
-            return
-        self.notice_data = result
-        self.notice_version = (result or {}).get('latest', '')
-        # Redrawn from scratch: the previous signature would otherwise hide a
-        # changed announcement.
-        self.notice_signature = None
+        for button in (getattr(self, 'notice_button', None), getattr(self, 'notices_check', None)):
+            if button is not None:
+                button.setEnabled(True)
+        if result is not None:
+            self.notice_data = result
+            self.notice_version = (result or {}).get('latest', '')
+            self.notice_history = self.collect_history(result, releases)
+            # Redrawn from scratch: the previous signature would otherwise hide a
+            # changed announcement.
+            self.notice_signature = None
+        elif manual:
+            self.status.setText('暂时连不上更新地址，可能没有网络；稍后再试即可。')
         if manual:
             state = self.notice_state()
             self.status.setText(f"已是最新版本（{VERSION}）" if state == 'none' else
                                 "程序已是最新版本，上面的提醒请留意。" if state == 'notice' else
                                 f"发现新版本 {self.notice_version}。")
         self.refresh()
+        after, self.notice_after = self.notice_after, None
+        if after is not None:
+            after(result)
+        # Once per launch: a check that failed has nothing to show, so it must
+        # not open an empty window in front of the user.
+        if result is not None:
+            self.open_notice_dialog()
+
+    # ------------------------------------------------------------------
+    # The one-click update
+
+    def update_available(self):
+        """The version a download would install, or ''."""
+        state = self.notice_state()
+        if state != 'version':
+            return ''
+        tag = (self.notice_data or {}).get('latest', '')
+        return tag if self_update.asset_name(tag) else ''
+
+    def can_install(self):
+        """Whether this copy can install what the download would fetch.
+
+        Asked from a card that ``refresh()`` redraws four times a second, so the
+        answer is looked up once per launch rather than on every repaint.
+        """
+        if self._installable is None:
+            self._installable = self_update.supports_in_place(self.workspace)
+        return self._installable
+
+    def update_note(self, tag=None):
+        """The sentence under the update button: what pressing it will do."""
+        if self.update_pending is not None:
+            return self.update_phase or '正在准备更新…'
+        tag = tag or self.update_available()
+        if not tag:
+            return ''
+        if not self.can_install():
+            return ('这次只能手动安装：这里没有随程序一起的运行环境。'
+                    f'可以下载 {tag} 手动解压覆盖，data 文件夹请保留。')
+        return ('会下载新版本并在校验后替换程序文件；data 文件夹里的作业记录与账号都保留，'
+                '更新完成后程序会自动重新打开。')
+
+    def start_update(self):
+        """Download the announced version and stage the switch, in the background.
+
+        Nothing in the program folder changes while the window is running: the
+        download and the unpacking happen in a staging folder, and only after
+        every step has succeeded does the restart script move the files in. A
+        failure at any point therefore leaves the version on screen working.
+        """
+        if self.update_pending is not None:
+            return False
+        tag = self.update_available()
+        if not tag:
+            self.status.setText('没有可更新的版本。')
+            return False
+        if not self.can_install():
+            self.status.setText('这次只能手动下载安装：当前没有随程序一起的运行环境。')
+            return False
+        workspace = Path(self.workspace)
+        self.update_pending = tag
+        self.update_error = ''
+        self.update_fraction = None
+        self.update_phase = '正在查找安装包…'
+        self.refresh_notices_page()
+
+        def phase(text, fraction=None):
+            # Runs in the worker; the window is redrawn only from finish_update.
+            self.update_phase = text
+            self.update_fraction = fraction
+
+        def worker():
+            answer = ''
+            try:
+                page = update_check.release_page(tag)
+                asset = self_update.asset_for(page, tag) if page else None
+                if asset is None:
+                    raise self_update.UpdateError('发布页上找不到这个版本的安装包，请稍后重试。')
+                folder = self_update.work_folder(workspace) / 'download'
+                total = [0]
+
+                def progress(done, expected):
+                    total[0] = expected
+                    # Repainting once per chunk would cost more than the download;
+                    # the label follows the megabytes instead.
+                    phase(f'正在下载 {tag}（{done / 1048576:.0f} MB'
+                          + (f' / {expected / 1048576:.0f} MB）' if expected else '）'),
+                          (done * 1000 // expected) if expected else None)
+
+                phase(f'正在下载 {tag}…')
+                archive, _digest = self_update.download(asset, folder, progress=progress)
+                phase('正在校验安装包…')
+                made = self_update.prepare(workspace, archive, minimum=self_update.MINIMUM_PACKAGE_BYTES)
+                answer = made
+            except self_update.UpdateError as error:
+                answer = self_update.UpdateError(str(error))
+            except Exception as error:  # a bug here must not leave the card spinning
+                answer = self_update.UpdateError('更新没有完成：' + str(error))
+            try:
+                self.update_ready.emit(answer)
+            except RuntimeError:
+                # Window closed while downloading; see the same guard above.
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def finish_update(self, answer):
+        """Keep the staged plan, or show why the update stopped."""
+        if isinstance(answer, Exception):
+            self.update_pending = None
+            self.update_fraction = None
+            self.update_error = str(answer)
+            self.update_phase = ''
+            self.status.setText(self.update_error)
+            self.refresh_notices_page()
+            return False
+        self.update_phase = '安装包已准备好，正在重新启动程序…'
+        self.refresh_notices_page()
+        self.restart_into_update(answer)
+        return True
+
+    def restart_into_update(self, made):
+        """Hand the switch to a script that outlives this window.
+
+        The running program cannot rename away the folder it is executing from,
+        so a separate interpreter does it: it waits for this process to end, swaps
+        the files, and starts the program again either way.
+        """
+        plan_path = self_update.work_folder(self.workspace) / 'plan.json'
+        report_path = self_update.work_folder(self.workspace) / 'report.json'
+        # The staging folder normally exists by now, but the plan must be
+        # written even when it does not: this is the last step before quitting.
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(json.dumps(made, ensure_ascii=False, indent=1), encoding='utf-8')
+        report_path.unlink(missing_ok=True)
+        switch = (f'import subprocess, sys, time\n'
+                  f'command = {self_update.script_command(self.workspace, plan_path, report_path)!r}\n'
+                  f'restart = {self_update.restart_command(self.workspace)!r}\n'
+                  f'time.sleep(1.5)\n'
+                  f'subprocess.run(command, timeout=600)\n'
+                  f'subprocess.Popen(restart)\n')
+        python = self_update.script_command(self.workspace, plan_path, report_path)[0]
+        try:
+            subprocess.Popen([python, '-c', switch])
+        except OSError as error:
+            self.update_pending = None
+            self.update_error = f'无法启动安装程序：{error}'
+            self.refresh_notices_page()
+            return False
+        self.status.setText('正在安装新版本，程序会自动重新打开。')
+        self.quitting = True
+        if self.tray is not None:
+            self.tray.hide()
+        QApplication.instance().quit()
+        return True
+
+    def open_download(self):
+        """The manual route: open the release page, as before one-click existed."""
+        return self.open_notice()
+
+    def update_ready_text(self):
+        """The label on the update button."""
+        if self.update_pending is not None:
+            return '正在更新…'
+        return f'立即更新到 {self.update_available()}'
+
+    def collect_history(self, result, releases):
+        """Every release read, newest first, with the extra fields filled in.
+
+        The list is replaced wholesale on every check and kept here rather than
+        in the settings file: it is a view of what the repository says, not
+        something the user decided.
+        """
+        latest = (result or {}).get('latest', '')
+        entries = []
+        for release in releases or ():
+            page = release.get('page') if isinstance(release, dict) else None
+            if not isinstance(page, (bytes, bytearray, str)):
+                continue
+            extra = update_check.all_page(release.get('tag', ''), page)
+            entries.append(dict(tag=release.get('tag', ''), url=release.get('url', ''),
+                                notes=extra['notes'], detail=extra['detail'],
+                                announcements=extra['announcements'],
+                                latest=release.get('tag') == latest))
+        if result is not None and (latest or (result or {}).get('announcements')):
+            # The answer from the card's check is authoritative for the newest
+            # release, even when the archive walk found nothing at all.
+            first = dict(tag=latest, url=(result or {}).get('url', ''),
+                         notes=(result or {}).get('notes', ''), detail='',
+                         announcements=(result or {}).get('announcements', []), latest=True)
+            if not entries or entries[0].get('tag') != latest:
+                entries.insert(0, first)
+            elif not entries[0].get('detail'):
+                entries[0] = first
+        return update_check.history(entries)
+
+    def open_notice_dialog(self):
+        """Show (or raise) the announcement window."""
+        if self.notice_dialog is None:
+            self.notice_dialog = NoticeDialog(self, self)
+        self.notice_dialog.refill()        # Sized to its content, then capped: a short notice deserves a small
+        # window, and a long history is scrolled rather than grown.
+        screen = self.notice_dialog.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        height = self.notice_dialog.sizeHint().height()
+        tallest = min(780, available.height() - 120) if available is not None else 780
+        self.notice_dialog.resize(max(660, self.notice_dialog.sizeHint().width()), max(420, min(height, tallest)))
+        self.notice_dialog.show()
+        self.notice_dialog.raise_()
+        self.notice_dialog.activateWindow()
+        return self.notice_dialog
+
+    def notice_summary(self):
+        """The line above the announcement list."""
+        if self.notice_busy:
+            return '正在检查新版本与公告…'
+        if not self.notice_data:
+            return f'当前版本 {VERSION}。还没检查过更新，点「检查更新」可以现在查一次。'
+        data = self.notice_data
+        if data.get('latest') and update_check.newer(data['latest']) and data.get('url'):
+            return f'当前版本 {VERSION}，有新版本 {data["latest"]} 可用。'
+        return f'当前版本 {VERSION}，已经是最新版本。'
+
+    def notice_footer(self):
+        if self.notice_data is None:
+            return '检查只读公开的发布页，不上传任何数据。'
+        return '关闭这个窗口不会清掉公告；「公告」页和这里随时可以再看。'
+
+    def notice_document(self, history=None):
+        """Everything published, newest first, as HTML for the plain viewer.
+
+        Built here rather than in the dialog so the archive page, the dialog and
+        the tests all read from one description of the same content.  Only
+        inline styles are used: Qt's rich-text engine understands a small subset
+        of CSS, and asking it for more leaves the text in the widget's default
+        black-on-white instead of the app's own colours.
+        """
+        history = self.notice_history if history is None else history
+        seen = set(self.store.data['settings'].get('announcement_seen', []) or [])
+        body = 'font-family:"Microsoft YaHei UI";font-size:12.5px;color:#4f5d75;line-height:165%'
+        blocks = [f'<div style="{body}">']
+        if not history:
+            if self.notice_busy:
+                blocks.append('<p style="color:#a3adbe">正在检查…</p>')
+            else:
+                blocks.append('<p style="color:#a3adbe">还没有读到任何公告。<br>'
+                              '检查成功之后，每个版本和它带来的公告都会列在这里。</p>')
+            blocks.append('</div>')
+            return ''.join(blocks)
+        for index, release in enumerate(history):
+            tag = html.escape(str(release.get('tag', '')))
+            # One hairline between entries only, so the list does not end in a
+            # rule hanging in empty space.
+            if index:
+                blocks.append('<p style="margin:20px 0 0 0;border-top:1px solid #eef1f6"></p>')
+            badge = ('&nbsp;&nbsp;<span style="color:#7a6bd1;background:#f1eefc;padding:1px 6px;'
+                     'border-radius:6px">最新版本</span>') if release.get('latest') else ''
+            blocks.append(f'<p style="margin:0;font-size:14px;font-weight:600;color:#2c394f">'
+                          f'{tag}{badge}</p>')
+            if release.get('notes'):
+                blocks.append(f'<p style="margin:6px 0 0 0;line-height:155%">'
+                              f'{html.escape(str(release["notes"]))}</p>')
+            for item in release.get('announcements') or ():
+                warning = item.get('level') == 'warning'
+                colour = '#b26a00' if warning else '#33405a'
+                title = html.escape(str(item.get('title', '')))
+                if item.get('id') in seen:
+                    title += '&nbsp;&nbsp;<span style="color:#b3bdcb">已读</span>'
+                blocks.append(f'<p style="margin:16px 0 0 0;font-size:13px;font-weight:600;color:{colour}">'
+                              f'{title}</p>')
+                if item.get('body'):
+                    blocks.append(f'<p style="margin:6px 0 0 0;line-height:150%">'
+                                  f'{html.escape(str(item["body"]))}</p>')
+                if item.get('link'):
+                    link = html.escape(str(item['link']))
+                    blocks.append(f'<p style="margin:6px 0 0 0;"><a style="color:#3b7eed" '
+                                  f'href="{link}">{link}</a></p>')
+            if release.get('detail'):
+                lines = [html.escape(line) for line in str(release['detail']).split('\n') if line.strip()]
+                blocks.append('<p style="margin:14px 0 0 0;color:#9aa8bb;font-size:11px;line-height:150%">'
+                              + '<br>'.join(lines) + '</p>')
+        blocks.append('</div>')
+        return ''.join(blocks)
+
+    def open_release_page(self):
+        """Open every published release in the browser."""
+        target = update_check.archive_url()
+        if QDesktopServices.openUrl(QUrl(target)):
+            return True
+        self.status.setText(f'未能打开浏览器，请手动访问：{target}')
+        return False
+
+    def refresh_notices_page(self):
+        if not hasattr(self, 'notices_view'):
+            return
+        self.notices_check.setEnabled(not self.notice_busy)
+        self.notices_check.setText('检查中…' if self.notice_busy else '检查更新')
+        self.notices_summary.setText(self.notice_summary())
+        self.notices_footer.setText(self.notice_footer())
+        self.notices_update.setText(self.update_ready_text() if self.update_available() else '')
+        self.notices_update.setVisible(bool(self.update_available()) or self.update_pending is not None)
+        self.notices_update.setEnabled(self.update_pending is None and self.can_install())
+        note = self.update_note() if (self.update_available() or self.update_pending) else ''
+        if note != self.notices_note.text():
+            self.notices_note.setText(note)
+            self.notices_note.setVisible(bool(note))
+            if note:
+                self.fit_wrapped(self.notices_note)
+        self.refresh_notices_view()
+
+    def refresh_notices_view(self):
+        """Rebuild the archive document, if the window is showing the archive.
+
+        Built on arrival rather than on every tick: the document is expensive,
+        and nothing is lost by leaving the page empty until someone opens it.
+        """
+        if not hasattr(self, 'notices_view'):
+            return
+        if (self.notices_view.toPlainText(), self.notice_busy) != getattr(self, 'notices_ready', None):
+            # Rebuilt only when the visible answer changed: refresh() runs four
+            # times a second, and rewriting a document that often would throw
+            # away the scroll position.
+            self.notices_ready = (self.notices_view.toPlainText(), self.notice_busy)
+            self.notices_view.setHtml(self.notice_document(self.notice_history))
+            self.notices_view.verticalScrollBar().setValue(0)
 
     def start_usage_ping(self):
         """Count this install once a day, only if the user turned it on.
@@ -1255,7 +1810,12 @@ class Window(QMainWindow):
 
         def worker():
             answered = usage_ping.report(status)
-            self.usage_ready.emit(answered)
+            try:
+                self.usage_ready.emit(answered)
+            except RuntimeError:
+                # Window closed while the request was in flight; see the same
+                # guard in start_notice_check.
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
         return True
@@ -1292,7 +1852,8 @@ class Window(QMainWindow):
         # Recomputed on every tick, so this must stay allocation-only: the
         # widgets below are touched only when the answer changes.
         signature = (state, self.notice_version, top.get('id'), top.get('title'), top.get('body'),
-                     top.get('link'), len(current), self.notice_busy)
+                     top.get('link'), len(current), self.notice_busy,
+                     self.update_pending, self.update_phase)
         if signature == self.notice_signature:
             return
         self.notice_signature = signature
@@ -1302,21 +1863,37 @@ class Window(QMainWindow):
             # must be reset explicitly or the next card inherits their state.
             self.notice_action.setVisible(True)
             self.notice_dismiss.setVisible(True)
+            self.notice_press.setVisible(False)
             return
         if state == 'version':
             self.set_notice_title(f"有新版本 {self.notice_version}")
-            self.notice_body.setText((self.notice_data or {}).get('notes') or '下载新版本后，把程序文件夹解压覆盖即可；data 文件夹请保留。')
-            self.notice_action.setText('下载新版本')
+            if self.update_pending is not None:
+                self.notice_body.setText(self.update_phase or '正在准备更新…')
+            else:
+                self.notice_body.setText(self.update_note() or
+                                         (self.notice_data or {}).get('notes') or
+                                         '下载新版本后，把程序文件夹解压覆盖即可；data 文件夹请保留。')
+            self.notice_action.setText('打开发布页' if self.can_install() else '下载新版本')
             self.notice_action.setVisible(True)
             self.notice_dismiss.setVisible(False)
+            # The card offers the one press directly; the page stays beside it.
+            self.notice_press.setText(self.update_ready_text())
+            self.notice_press.setEnabled(self.update_pending is None and self.can_install())
+            self.notice_press.setVisible(self.can_install())
+            self.mark_notice('#7a6bd1')
         elif state == 'notice':
             self.set_notice_title(top.get('title', ''), top.get('level') == 'warning')
             self.notice_body.setText(top.get('body', ''))
-            self.notice_action.setText('查看详情')
-            self.notice_action.setVisible(bool(top.get('link')))
+            self.notice_action.setText('查看公告')
+            self.notice_action.setVisible(True)
             self.notice_dismiss.setText('知道了' if len(current) == 1 else f'知道了（还有 {len(current) - 1} 条）')
             self.notice_dismiss.setVisible(True)
+            self.notice_press.setVisible(False)
+            self.mark_notice('#b26a00' if top.get('level') == 'warning' else '#7a6bd1')
         self.fit_notice_text()
+
+    def mark_notice(self, colour):
+        self.notice_mark.setStyleSheet(f'background:{colour};border-radius:1px')
 
     def fit_notice_text(self):
         """Give the wrapped notice text the height its width actually needs.
@@ -1329,7 +1906,7 @@ class Window(QMainWindow):
         """
         width = self.notice_body.width()
         if width <= 0:
-            width = max(self.notice.width() - 200, 200)
+            width = max(self.notice.width() - 220, 200)
         for label in (self.notice_title, self.notice_body):
             self.fit_wrapped(label, width)
 

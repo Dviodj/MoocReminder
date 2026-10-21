@@ -56,7 +56,8 @@ src/
    ├─ source_launcher.py                启动器主体：选运行环境、校验依赖、建快捷方式、拉起主窗口
    ├─ desktop_shortcut.py               快捷方式读写：桌面与「启动」文件夹共用，只碰本程序自己的
    ├─ autostart.py                      开机自启动：在「启动」文件夹里放置带 --background 的启动项
-   ├─ update_check.py                   更新检查与公告：读 GitHub 发布页，不碰限流的接口
+   ├─ update_check.py                   更新检查与公告：读 GitHub 发布页（含历史版本），不碰限流的接口
+   ├─ self_update.py                    一键更新：找安装包、下载校验、解包准备，再由独立脚本换文件
    ├─ usage_ping.py                     可选的使用人数统计：每台设备在公开 issue 上留一条自己的评论
    └─ qt_bootstrap.py                   固定 Qt 的 TEMP/ICU，并设置 QtWebEngine 必需的沙箱与写入目录
 
@@ -125,7 +126,7 @@ Qt 的库跨 wheel 分布，`QtWebEngineCore` 依赖只随 `PySide6-Addons` 分�
 → `src/web/worker.py` → `src/web/browser.py` → `src/web/site_scripts.py` + `src/web/qt_reader.py`，
 配套 `src/domain/core.py`、`src/domain/storage.py`、`src/domain/profiles.py`、`src/system/qt_bootstrap.py`、
 `src/system/desktop_shortcut.py`、`src/system/autostart.py`、`src/system/update_check.py`、
-`src/system/usage_ping.py`、`src/version.py`。
+`src/system/self_update.py`、`src/system/usage_ping.py`、`src/version.py`。
 
 `src/web/browser.py` 不再自带浏览器：它必须由调用方通过 `context_provider` 提供，桌面版注入的就是
 `src/web/qt_reader.py` 的 QtWebEngine 适配器。没有适配器时它会明确报错，而不是静默失败。
