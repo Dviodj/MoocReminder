@@ -30,7 +30,7 @@ for _name, _value in _saved_temp.items():
 from PySide6.QtWidgets import QApplication
 from qt_desktop import Window, EmailSettingsForm, EmailLogPage, LockScreen, RegisterDialog
 from core import Course, COURSE_URL, parse_assignment, BEIJING
-from datetime import datetime
+from datetime import date, datetime
 from storage import Store
 import secrets_store
 import profiles as profiles_module
@@ -1112,6 +1112,14 @@ class UpdateUiTests(unittest.TestCase):
                 time.sleep(0.01)
         saved = self.window.store.data['settings']['usage_status']
         self.assertEqual('2026-10-21', saved.get('reported'))
+        # The window asks usage_ping.due() about the real clock, so the app-side
+        # guard can only be exercised by a record that belongs to today. Rewrite
+        # the recorded date to today instead of pinning the assertion to a
+        # constant, which would make this test expire the day after it was
+        # written rather than test anything about the window.
+        today = date.today().isoformat()
+        self.window.controller.settings(dict(usage_status=dict(install=install, reported=today)))
+        saved = self.window.store.data['settings']['usage_status']
         self.assertFalse(usage_ping.due(saved))
         with patch('qt_desktop.threading.Thread') as thread:
             self.assertFalse(self.window.start_usage_ping())

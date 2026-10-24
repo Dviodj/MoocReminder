@@ -77,6 +77,20 @@ class CoreTests(unittest.TestCase):
         for url in ['https://evil.example/learn/NEU-1?tid=123', 'https://www.icourse163.org.evil.example/learn/NEU-1?tid=123', 'javascript:alert(1)', 'https://www.icourse163.org/course/NEU-1']:
             self.assertIsNone(normalize_course_url(url))
 
+    def test_the_redesigned_course_page_address_is_understood(self):
+        # Every card on the home page opens a popup that lands on the new
+        # /mooc/learn/<id>/<section> address. Rejecting it meant no course could
+        # be discovered at all.
+        for url in ['https://www.icourse163.org/mooc/learn/NEU-1002822009/content?tid=1488060444',
+                    'https://www.icourse163.org/mooc/learn/NEU-1002822009/announce?tid=1488060444',
+                    'https://www.icourse163.org/mooc/course/NEU-1002822009?tid=1488060444']:
+            self.assertEqual(normalize_course_url(url),
+                             'https://www.icourse163.org/learn/NEU-1002822009?tid=1488060444#/learn/testlist')
+
+    def test_a_spoc_page_address_keeps_its_spoc_prefix(self):
+        self.assertEqual(normalize_course_url('https://www.icourse163.org/spoc/learn/NEU-1486300165/content?tid=1488061441'),
+                         'https://www.icourse163.org/spoc/learn/NEU-1486300165?tid=1488061441#/learn/testlist')
+
     def test_late_first_run_issues_only_nearest_window_and_deduplicates(self):
         state = {}
         alerts = due_reminders([self.item()], [72, 24, 3], state, self.now)

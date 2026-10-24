@@ -193,7 +193,12 @@ def _course_parts(url):
     p = urlsplit(urljoin('https://www.icourse163.org/', clean_pasted(url)))
     if p.scheme != 'https' or (p.hostname or '').lower() != 'www.icourse163.org' or p.username or p.password:
         return '', '', ''
-    match = re.fullmatch(r'/(?:course|learn|spoc/course|spoc/learn)/([A-Za-z0-9_-]+)', p.path)
+    # The newer course pages put the section in the path
+    # (/mooc/learn/NEU-1002822009/announce?tid=…), so anything after the course
+    # id is allowed. Rejecting it made every card on the home page fail to
+    # produce a link, because that is where the popup lands.
+    match = re.fullmatch(r'/(?:(?:spoc|mooc)/)?(?:course|learn)/([A-Za-z0-9_-]+)(?:/[A-Za-z0-9_-]+)*',
+                         p.path)
     tid = parse_qs(p.query).get('tid', [''])[0]
     if not match:
         return '', '', tid

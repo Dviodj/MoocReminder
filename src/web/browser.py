@@ -6,16 +6,31 @@ to the QtWebEngine adapter. Without one there is no browser to read with, so
 """
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import re
 import time
+from urllib.parse import urlsplit
 
 from core import (Course, normalize_course_url, parse_assignment, valid_home_url,
                   normalize_home_url, home_url_problem, account_id)
-from site_scripts import ASSIGNMENTS_SCRIPT, HOME_CARDS_SCRIPT, CATEGORIES_SCRIPT, ACCOUNT_SCRIPT, classify_assignment_page
+from site_scripts import (ASSIGNMENTS_SCRIPT, ENTER_SCRIPT, HOME_CARDS_SCRIPT, OPEN_SECTION_SCRIPT,
+                          SECTION_SCRIPT, CATEGORIES_SCRIPT, ACCOUNT_SCRIPT, classify_assignment_page)
 
 
 class LoginRequired(RuntimeError):
     pass
+
+
+# The site replaced its course pages: the section that lists quizzes and
+# homework is now reached through the course's own navigation instead of a
+# fixed address, and the address itself carries a term id that only exists
+# after the course is entered from its introduction page. Everything below
+# works with either generation, so a course that still serves the old page is
+# read exactly as before.
+SECTION = '测验与作业'
+_COURSE_KEY = re.compile(r'/((?:spoc/)?(?:course|learn))/([A-Za-z0-9_-]+)')
+_LEARN_PATH = re.compile(r'/(?:spoc/)?learn/[A-Za-z0-9_-]+')
+_TERM = re.compile(r'[?&]tid=(\d+)')
 
 
 @dataclass
@@ -31,6 +46,44 @@ def _is_empty(data):
     """True when a script result reports 'nothing here' rather than content."""
     return ((isinstance(data, list) and not data)
             or (isinstance(data, dict) and data.get('empty') and not data.get('rows')))
+
+
+def learn_address(url):
+    """The address of a course's learn pages, built from any course address.
+
+    Both the old and the new site call the same course the same way in the URL;
+    only the section that follows differs, and the new site takes the section
+    from navigation rather than from the address. A link found on the course
+    home has no term id, and does not need one: the site resolves the term from
+    the session and redirects.
+    """
+    parts = urlsplit(url or '')
+    course = _COURSE_KEY.search(parts.path or '')
+    if not course:
+        return None
+    term = _TERM.search('?' + (parts.query or ''))
+    prefix = 'spoc/learn' if course.group(1).startswith('spoc') else 'learn'
+    address = f'https://www.icourse163.org/{prefix}/{course.group(2)}'
+    return address + ('?tid=' + term.group(1) if term else '')
+
+
+def loose_course_url(anchor):
+    """Turn a card's own anchor (``/learn/NEU-1#/learn/score``) into a course URL."""
+    match = re.match(r'^/((?:spoc/)?learn)/([A-Za-z0-9_-]+)', anchor or '')
+    if not match:
+        return None
+    return f'https://www.icourse163.org/{match.group(1)}/{match.group(2)}#/learn/testlist'
+
+
+def intro_address(url):
+    """The course introduction page, which is where a term id can be learned."""
+    learn = learn_address(url)
+    if not learn:
+        return None
+    parts = urlsplit(learn)
+    course = _COURSE_KEY.search(parts.path).group(2)
+    prefix = 'spoc/course' if '/spoc/' in parts.path else 'course'
+    return f'https://www.icourse163.org/{prefix}/{course}?tid={_TERM.search(learn).group(1)}'
 
 
 # Cookies the MOOC site issues; anything else in a pasted header is ignored so a
@@ -206,6 +259,50 @@ class MoocBrowser:
         if evidence['id'] != expected:
             raise LoginRequired('登录账号与设置中的课程主页不一致，请切换账号或修改主页链接。')
 
+    def _open_assessments(self, page, course):
+        """Get the page that lists quizzes and homework onto `page`.
+
+        The new site no longer serves that list at a fixed address: opening one
+        directly is bounced back to the course introduction. It has to be
+        entered through the introduction page, and its section is then chosen
+        from the course navigation. The old site answered the address directly,
+        so it is still tried first — if it answers, nothing else is needed.
+        """
+        target = learn_address(course.url)
+        if not target:
+            raise RuntimeError('学习链接不正确，请手动添加该课程的作业页链接。')
+        for attempt in (0, 1):
+            self._goto(page, target if attempt == 0 else (intro_address(target) or target))
+            if _LEARN_PATH.search(urlsplit(page.url).path or ''):
+                break
+            if attempt:
+                raise LoginRequired('作业链接跳转到课程介绍，请重新登录或确认已选课。')
+            entered = page.evaluate(ENTER_SCRIPT)
+            if not entered.get('clicked'):
+                raise LoginRequired('没有找到“已参加，进入学习”按钮，请确认已经选修这门课。')
+            try:
+                page.wait_for_url(re.compile(r'https://www\.icourse163\.org/(?:spoc/)?learn/'), timeout=20000)
+            except Exception as exc:
+                # Reaching the learn pages needs one more navigation on the new
+                # site; if that did not happen the browser is on the
+                # introduction page and the list will never appear.
+                raise LoginRequired('未能进入课程学习页，请重新登录或确认已选课。') from exc
+        # The old page carried the whole list in one document under a fixed
+        # anchor. The new one only fetches a section's data once that section is
+        # the current one, so the section has to be chosen by clicking it.
+        self._settle(page, SECTION_SCRIPT, lambda d: bool(d.get('tabs')))
+        section = page.evaluate(SECTION_SCRIPT)
+        if section.get('login') and not section.get('tabs'):
+            raise LoginRequired('登录已失效，请重新登录。')
+        if section.get('tabs') and section.get('at') != SECTION and SECTION in section.get('tabs'):
+            # The script takes the section name, so it is invoked here rather
+            # than through evaluate(), which calls its argument with no
+            # arguments of its own.
+            clicked = page.evaluate_expression('(' + OPEN_SECTION_SCRIPT + ')(' + json.dumps(SECTION) + ')')
+            if not clicked.get('clicked'):
+                raise RuntimeError('未能切换到“测验与作业”，官网页面结构可能已发生变化。')
+            self._settle(page, SECTION_SCRIPT, lambda d: d.get('at') == SECTION)
+
     def discover_courses(self, home_url, include_finished=False):
         if not valid_home_url(home_url):
             raise ValueError('课程主页链接不正确')
@@ -244,13 +341,26 @@ class MoocBrowser:
                             name = card['name'] or '未命名课程'
                             try:
                                 url = normalize_course_url(card['href']) if card['href'] else None
+                                if not url and card.get('learn'):
+                                    # The card's own anchor names the course; the
+                                    # site resolves the term from the session, so
+                                    # the learn URL works without a tid. It is kept
+                                    # without one: the stored link is a label here,
+                                    # and the reader adds the tid it lands on.
+                                    url = loose_course_url(card['learn'])
                                 if not url:
+                                    # The card has neither an href nor a course
+                                    # anchor, so the only way to learn its
+                                    # address is to open it. The page's script
+                                    # attaches to the click, and it lands on
+                                    # /mooc/learn/<id>/<section>, which
+                                    # normalize_course_url now accepts.
                                     popup = None
                                     try:
                                         with page.expect_popup(timeout=15000) as opened:
                                             page.locator('.j-course-card-box').nth(card['index']).locator('.title span.text').click()
                                         popup = opened.value
-                                        popup.wait_for_url(re.compile(r'https://www\.icourse163\.org/(?:spoc/)?learn/'), timeout=20000)
+                                        popup.wait_for_url(re.compile(r'https://www\.icourse163\.org/(?:spoc/|mooc/)?learn/'), timeout=20000)
                                         url = normalize_course_url(popup.url)
                                     finally:
                                         if popup:
@@ -280,9 +390,10 @@ class MoocBrowser:
     def scan_course(self, course):
         page = self.context.new_page()
         try:
-            self._goto(page, course.url)
-            if '/learn/' not in page.url:
-                raise LoginRequired('作业链接跳转到课程介绍，请重新登录或确认已选课。')
+            self._open_assessments(page, course)
+            # The account check reads the page that is actually open, so it has
+            # to come after the navigation: the login gate sends an expired
+            # session to the introduction page, which carries no account marker.
             self._verify_account(page, self.account)
             data = self._settle(page, ASSIGNMENTS_SCRIPT, lambda d: classify_assignment_page(d) != 'error')
             state = classify_assignment_page(data)

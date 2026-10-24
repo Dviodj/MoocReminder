@@ -11,7 +11,7 @@ import threading
 import time
 from urllib.parse import urljoin
 
-from PySide6.QtCore import QObject, Signal, Slot, QUrl, qVersion
+from PySide6.QtCore import QObject, Signal, Slot, QUrl, qVersion, QCoreApplication, QEventLoop
 from PySide6.QtNetwork import QNetworkCookie
 from PySide6.QtWidgets import QMainWindow, QLineEdit, QVBoxLayout, QWidget, QLabel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineLoadingInfo
@@ -256,6 +256,17 @@ class Page:
         reason = reason.group(0) if reason else ''
         self.context.manager.record('navigation', host=url.host(), path=url.path(),
             status=info.status().name, domain=info.errorDomain().name, code=info.errorCode(), reason=reason)
+        # A navigation can finish without raising loadFinished here: the flag is
+        # cleared before setUrl, and Qt only reports the outcome through this
+        # signal when the load completes in the same event-loop pass. Without
+        # this the wait below ran out its whole timeout on a page that had in
+        # fact loaded — which is exactly what "网页加载超时" reported.
+        if info.status() == QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus:
+            self.load_ok = True
+            self.load_done.set()
+        elif info.status() == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
+            self.load_ok = False
+            self.load_done.set()
         if info.status() == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
             if not self.failure:
                 self.failure = f'官网加载失败（{info.errorDomain().name}，{info.errorCode()}，{reason}）。'
@@ -290,42 +301,97 @@ class Page:
     def url(self):
         return self._call(lambda request: request.finish(self.page.url().toString()))
 
-    def evaluate_expression(self, expression):
-        def run(request):
+    def evaluate_expression(self, expression, timeout=15):
+        """Run an expression in the page and wait for its value.
+
+        The result arrives through Qt's own callback, which is only delivered
+        while the event loop is pumping — a plain sleep would wait forever.
+        Pumping here is safe precisely because the caller is the GUI thread:
+        the script itself runs to completion before this loop is entered.
+        """
+        result = {}
+
+        def run():
             if self.failure:
-                return request.finish(error=RuntimeError(self.failure))
+                result['error'] = RuntimeError(self.failure)
+
+                return
+
             def completed(value):
                 if not isinstance(value, str):
-                    return request.finish(error=RuntimeError(self.failure or '网页尚未准备好，请稍后重试。'))
-                try:
-                    request.finish(json.loads(value))
-                except ValueError as exc:
-                    request.finish(error=exc)
-            self.page.runJavaScript('JSON.stringify((()=>{' + 'return (' + expression + ');})())',
-                completed)
-        return self._call(run)
+                    result['error'] = RuntimeError(self.failure or '网页尚未准备好，请稍后重试。')
+                elif not value:
+                    # A script that throws also yields ""; report that as the
+                    # page still warming up instead of a bare JSON decode error.
+                    result['error'] = RuntimeError('网页脚本没有返回结果，页面可能还没有准备好。')
+                else:
+                    try:
+                        result['value'] = json.loads(value)
+                    except ValueError as exc:
+                        result['error'] = exc
+            # The value has to be computed, not stringified: serialising a
+            # function yields "" (functions have no JSON form), which read as
+            # "page not ready" and made every caller wait out its whole timeout.
+            # The expression is bound to a variable rather than returned
+            # directly, because `return (` + expression + ')' puts a bare value
+            # such as `2` on a line that automatic semicolon insertion ends
+            # early, leaving the return unreachable.
+            self.page.runJavaScript('JSON.stringify((() => {\nconst value = (' + expression + ');\n'
+                'return value;\n})())', completed)
+
+        self.context.manager.bridge.requested.emit(Request(lambda request: (run(), request.finish(True))))
+        end = time.monotonic() + timeout
+        while 'value' not in result and 'error' not in result:
+            if self.context.cancelled():
+                raise InterruptedError('当前操作已取消')
+            if time.monotonic() >= end:
+                raise TimeoutError('网页读取超时，请重试；界面可以继续使用。')
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+            time.sleep(0.01)
+        if 'error' in result:
+            raise result['error']
+        return result['value']
 
     def evaluate(self, script):
+        # A script is handed in as a function (`() => document.title`), so it has
+        # to be called; passing it straight to evaluate_expression would
+        # serialise the function instead of its result.
         return self.evaluate_expression('(' + script + ')()')
 
     def goto(self, url, wait_until='domcontentloaded', timeout=30000):
         # A fresh document prevents stale SPA category cards being accepted.
+        # The blank page is loaded before the real request rather than merely
+        # queued: navigating away from a still-loading blank page left the real
+        # navigation parked for the whole timeout, and the page then loaded
+        # normally afterwards — which is what made this look like a Qt bug.
         current = self.url
         if current and current != 'about:blank' and url != 'about:blank':
-            self.goto('about:blank', timeout=5000)
+            self.load_done.clear()
+            self._call(lambda request: (self.page.setUrl(QUrl('about:blank')), request.finish(True)))
+            try:
+                self.wait_for_load_state('commit', 5000)
+            except TimeoutError:
+                pass
         self.load_done.clear()
         self._call(lambda request: (self.page.setUrl(QUrl(url)), request.finish(True)))
-        # setUrl only queues navigation. Qt has no separate commit signal;
-        # require a successful load before telling the user the page is ready.
+        # setUrl only queues navigation. The load signal is what proves the
+        # document can be scripted: the URL changes as soon as the navigation
+        # commits, which is well before a script may run against it.
         self.wait_for_load_state(wait_until, timeout)
 
     def wait_for_load_state(self, state='networkidle', timeout=10000):
         end = time.monotonic() + timeout / 1000
-        while not self.load_done.wait(0.1):
+        # Blocking here would stop the very signals being awaited: this runs on
+        # the GUI thread, and Qt can only deliver loadStarted/loadFinished from
+        # its event loop. Waiting on the Event alone parked the navigation for
+        # the whole timeout and only then let it start.
+        while not self.load_done.is_set():
             if self.context.cancelled():
                 raise InterruptedError('当前操作已取消')
             if time.monotonic() >= end:
                 raise TimeoutError('网页加载超时，已保留上次数据。')
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 50)
+            time.sleep(0.01)
         if not self.load_ok:
             raise RuntimeError(self.failure or '内置网页未能加载，请关闭登录窗口后重新连接。')
         if state == 'networkidle':
@@ -398,7 +464,6 @@ class Popup:
                 self.page.evaluate_expression('(()=>{window.open=window.__courseOpenBackup;delete window.__courseOpenBackup;delete window.__courseOpenUrl;return true;})()')
             except Exception:
                 pass
-
 
 class Locator:
     def __init__(self, page, expression):
